@@ -4,7 +4,14 @@ A React application demonstrating Chrome's built-in Prompt API with Gemini Nano.
 
 ## DEMO
 
+### Describing what appears in the video
 ![demo](./docs/images/demo.gif)
+
+### Text Chat 
+![demo](./docs/images/demo-chat.gif)
+
+### Realtime Transcription
+![demo](./docs/images/demo-audio.gif)
 
 ## Features
 

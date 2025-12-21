@@ -36,7 +36,8 @@ declare global {
 
   type LanguageModelContentPart =
     | { type: 'text'; value: string }
-    | { type: 'image'; value: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | Blob | ImageData };
+    | { type: 'image'; value: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | Blob | ImageData }
+    | { type: 'audio'; value: AudioBuffer | ArrayBuffer | ArrayBufferView | Blob };
 
   interface LanguageModelAPI {
     availability(options?: { expectedInputs?: Array<{ type: string }> }): Promise<string>;
