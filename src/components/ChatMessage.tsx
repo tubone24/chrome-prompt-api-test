@@ -1,4 +1,5 @@
 import { Bot, User } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import type { Message } from '../hooks/usePromptAPI';
 
 interface ChatMessageProps {
@@ -34,8 +35,12 @@ export function ChatMessage({ message }: ChatMessageProps) {
             className="max-w-xs rounded-lg mb-2 border border-[hsl(var(--border))]"
           />
         )}
-        <div className="text-[hsl(var(--foreground))] whitespace-pre-wrap break-words">
-          {message.content}
+        <div className="text-[hsl(var(--foreground))] prose prose-sm dark:prose-invert max-w-none">
+          {isUser ? (
+            <div className="whitespace-pre-wrap break-words">{message.content}</div>
+          ) : (
+            <ReactMarkdown>{message.content}</ReactMarkdown>
+          )}
           {message.isStreaming && (
             <span className="inline-block w-2 h-4 ml-1 bg-[hsl(var(--primary))] animate-pulse" />
           )}
