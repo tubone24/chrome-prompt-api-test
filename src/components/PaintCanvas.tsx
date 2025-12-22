@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Pen, Eraser, Trash2, Palette } from 'lucide-react';
+import { Pen, Eraser, Trash2, Palette, ChevronDown } from 'lucide-react';
 import { usePromptAPI } from '../hooks/usePromptAPI';
 import { ChatMessage } from './ChatMessage';
 
@@ -7,11 +7,15 @@ type Tool = 'pen' | 'eraser' | 'fill';
 
 export const PaintCanvas = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [tool, setTool] = useState<Tool>('pen');
   const [color, setColor] = useState('#000000');
   const [lineWidth, setLineWidth] = useState(5);
   const [lastPos, setLastPos] = useState<{ x: number; y: number } | null>(null);
+  const [showScrollIndicator, setShowScrollIndicator] = useState(false);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
 
   const {
     messages,
@@ -42,6 +46,37 @@ export const PaintCanvas = () => {
     // Initialize canvas with white background
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }, []);
+
+  // Auto-scroll to bottom when messages update
+  useEffect(() => {
+    if (shouldAutoScroll && messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, shouldAutoScroll]);
+
+  // Check scroll position and update indicator
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 50;
+
+      setShowScrollIndicator(!isNearBottom);
+      setShouldAutoScroll(isNearBottom);
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    handleScroll(); // Initial check
+
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setShouldAutoScroll(true);
   }, []);
 
   const getCanvasCoordinates = useCallback((
@@ -309,11 +344,14 @@ export const PaintCanvas = () => {
         </div>
 
         {/* AI Recognition Results */}
-        <div className="w-full lg:w-96 flex flex-col bg-[hsl(var(--secondary))] rounded-lg overflow-hidden">
+        <div className="w-full lg:w-96 flex flex-col bg-[hsl(var(--secondary))] rounded-lg overflow-hidden relative">
           <div className="p-3 border-b border-[hsl(var(--border))]">
             <h2 className="font-semibold">AI認識結果</h2>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div
+            ref={messagesContainerRef}
+            className="flex-1 overflow-y-auto p-4 space-y-4"
+          >
             {messages.length === 0 ? (
               <p className="text-sm text-[hsl(var(--muted-foreground))] text-center">
                 絵を描くと、AIがそれが何かを当てます！
@@ -333,7 +371,19 @@ export const PaintCanvas = () => {
                 </button>
               </div>
             )}
+            <div ref={messagesEndRef} />
           </div>
+
+          {/* Scroll to bottom indicator */}
+          {showScrollIndicator && (
+            <button
+              onClick={scrollToBottom}
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 p-2 bg-[hsl(var(--primary))] text-white rounded-full shadow-lg hover:bg-[hsl(var(--primary)/0.9)] transition-all animate-bounce"
+              title="最新のメッセージへ"
+            >
+              <ChevronDown className="w-5 h-5" />
+            </button>
+          )}
         </div>
       </div>
     </div>
