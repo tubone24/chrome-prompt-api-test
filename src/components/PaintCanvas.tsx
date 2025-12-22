@@ -1,21 +1,26 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Pen, Eraser, Trash2, Palette, ChevronDown } from 'lucide-react';
+import { Pen, Eraser, Trash2, Palette, ChevronDown, Image, SprayCan, Square } from 'lucide-react';
 import { usePromptAPI } from '../hooks/usePromptAPI';
 import { ChatMessage } from './ChatMessage';
 
-type Tool = 'pen' | 'eraser' | 'fill';
+type Tool = 'pen' | 'eraser' | 'fill' | 'spray' | 'rectangle';
 
 export const PaintCanvas = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [tool, setTool] = useState<Tool>('pen');
   const [color, setColor] = useState('#000000');
   const [lineWidth, setLineWidth] = useState(5);
+  const [sprayDensity, setSprayDensity] = useState(50);
   const [lastPos, setLastPos] = useState<{ x: number; y: number } | null>(null);
+  const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null);
   const [showScrollIndicator, setShowScrollIndicator] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+  const [rectangleFilled, setRectangleFilled] = useState(false);
+  const [tempCanvas, setTempCanvas] = useState<ImageData | null>(null);
 
   const {
     messages,
@@ -78,6 +83,52 @@ export const PaintCanvas = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     setShouldAutoScroll(true);
   }, []);
+
+  const handleImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith('image/')) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new window.Image();
+      img.onload = () => {
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext('2d');
+        if (!canvas || !ctx) return;
+
+        // Draw image scaled to fit canvas
+        const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+        const x = (canvas.width - img.width * scale) / 2;
+        const y = (canvas.height - img.height * scale) / 2;
+
+        ctx.drawImage(img, x, y, img.width * scale, img.height * scale);
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+
+    // Reset input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  }, []);
+
+  const sprayPaint = useCallback((x: number, y: number) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+
+    const radius = lineWidth * 2;
+    for (let i = 0; i < sprayDensity; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const distance = Math.random() * radius;
+      const px = x + Math.cos(angle) * distance;
+      const py = y + Math.sin(angle) * distance;
+
+      ctx.fillStyle = color;
+      ctx.fillRect(px, py, 1, 1);
+    }
+  }, [color, lineWidth, sprayDensity]);
 
   const getCanvasCoordinates = useCallback((
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
@@ -176,9 +227,24 @@ export const PaintCanvas = () => {
       return;
     }
 
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+
     setIsDrawing(true);
     setLastPos(pos);
-  }, [getCanvasCoordinates, tool, floodFill, color]);
+    setStartPos(pos);
+
+    // Save canvas state for rectangle preview
+    if (tool === 'rectangle') {
+      setTempCanvas(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    }
+
+    // Initial spray or pen point
+    if (tool === 'spray') {
+      sprayPaint(pos.x, pos.y);
+    }
+  }, [getCanvasCoordinates, tool, floodFill, color, sprayPaint]);
 
   const draw = useCallback((
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
@@ -191,7 +257,35 @@ export const PaintCanvas = () => {
     if (!canvas || !ctx) return;
 
     const pos = getCanvasCoordinates(e);
-    if (!pos || !lastPos) return;
+    if (!pos) return;
+
+    if (tool === 'spray') {
+      sprayPaint(pos.x, pos.y);
+      setLastPos(pos);
+      return;
+    }
+
+    if (tool === 'rectangle' && startPos && tempCanvas) {
+      // Restore canvas and draw preview rectangle
+      ctx.putImageData(tempCanvas, 0, 0);
+
+      const width = pos.x - startPos.x;
+      const height = pos.y - startPos.y;
+
+      if (rectangleFilled) {
+        ctx.fillStyle = color;
+        ctx.fillRect(startPos.x, startPos.y, width, height);
+      } else {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
+        ctx.strokeRect(startPos.x, startPos.y, width, height);
+      }
+      setLastPos(pos);
+      return;
+    }
+
+    // Regular pen/eraser
+    if (!lastPos) return;
 
     ctx.beginPath();
     ctx.moveTo(lastPos.x, lastPos.y);
@@ -203,12 +297,14 @@ export const PaintCanvas = () => {
     ctx.stroke();
 
     setLastPos(pos);
-  }, [isDrawing, getCanvasCoordinates, lastPos, color, lineWidth, tool]);
+  }, [isDrawing, getCanvasCoordinates, lastPos, startPos, color, lineWidth, tool, sprayPaint, tempCanvas, rectangleFilled]);
 
   const stopDrawing = useCallback(async () => {
     if (!isDrawing) return;
     setIsDrawing(false);
     setLastPos(null);
+    setStartPos(null);
+    setTempCanvas(null);
 
     // Send to AI for recognition
     const canvas = canvasRef.current;
@@ -282,6 +378,28 @@ export const PaintCanvas = () => {
               >
                 <Palette className="w-5 h-5" />
               </button>
+              <button
+                onClick={() => setTool('spray')}
+                className={`p-2 rounded transition-colors ${
+                  tool === 'spray'
+                    ? 'bg-[hsl(var(--primary))] text-white'
+                    : 'hover:bg-[hsl(var(--secondary))]'
+                }`}
+                title="スプレー"
+              >
+                <SprayCan className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => setTool('rectangle')}
+                className={`p-2 rounded transition-colors ${
+                  tool === 'rectangle'
+                    ? 'bg-[hsl(var(--primary))] text-white'
+                    : 'hover:bg-[hsl(var(--secondary))]'
+                }`}
+                title="矩形"
+              >
+                <Square className="w-5 h-5" />
+              </button>
             </div>
 
             {/* Color Picker */}
@@ -313,6 +431,55 @@ export const PaintCanvas = () => {
                 className="flex-1"
               />
             </div>
+
+            {/* Spray Density */}
+            {tool === 'spray' && (
+              <div className="flex items-center gap-2 flex-1 min-w-[150px]">
+                <label htmlFor="spray-density" className="text-sm font-medium whitespace-nowrap">
+                  密度: {sprayDensity}
+                </label>
+                <input
+                  id="spray-density"
+                  type="range"
+                  min="10"
+                  max="100"
+                  value={sprayDensity}
+                  onChange={(e) => setSprayDensity(Number(e.target.value))}
+                  className="flex-1"
+                />
+              </div>
+            )}
+
+            {/* Rectangle Fill Toggle */}
+            {tool === 'rectangle' && (
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={rectangleFilled}
+                    onChange={(e) => setRectangleFilled(e.target.checked)}
+                    className="cursor-pointer"
+                  />
+                  塗りつぶし
+                </label>
+              </div>
+            )}
+
+            {/* Image Upload */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleImageUpload}
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="p-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+              title="画像を貼り付け"
+            >
+              <Image className="w-5 h-5" />
+            </button>
 
             {/* Clear Button */}
             <button
