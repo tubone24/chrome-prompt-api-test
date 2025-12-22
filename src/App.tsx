@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { MessageSquare, Camera, Mic } from 'lucide-react';
+import { MessageSquare, Camera, Mic, Paintbrush } from 'lucide-react';
 import { Chat } from './components/Chat';
 import { AudioTranscription } from './components/AudioTranscription';
+import { PaintCanvas } from './components/PaintCanvas';
 
-type Mode = 'text' | 'camera' | 'audio';
+type Mode = 'text' | 'camera' | 'audio' | 'paint';
 
 function App() {
   const [mode, setMode] = useState<Mode>('text');
@@ -45,6 +46,17 @@ function App() {
           <Mic className="w-4 h-4" />
           文字起こし
         </button>
+        <button
+          onClick={() => setMode('paint')}
+          className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 text-sm font-medium transition-colors ${
+            mode === 'paint'
+              ? 'text-[hsl(var(--primary))] border-b-2 border-[hsl(var(--primary))] bg-[hsl(var(--primary)/0.1)]'
+              : 'text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.5)]'
+          }`}
+        >
+          <Paintbrush className="w-4 h-4" />
+          ペイント
+        </button>
       </div>
 
       {/* Content */}
@@ -52,6 +64,7 @@ function App() {
         {mode === 'text' && <Chat key="text" cameraMode={false} />}
         {mode === 'camera' && <Chat key="camera" cameraMode={true} />}
         {mode === 'audio' && <AudioTranscription key="audio" />}
+        {mode === 'paint' && <PaintCanvas key="paint" />}
       </div>
     </div>
   );
