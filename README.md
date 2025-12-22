@@ -22,10 +22,6 @@ A React application demonstrating Chrome's built-in Prompt API with Gemini Nano.
 - **Camera Recognition Mode**: Real-time image recognition with auto-capture
 - **Audio Transcription Mode**: Real-time speech-to-text transcription
 - **Paint Recognition Mode**: Draw on canvas and get AI to recognize your drawings
-  - Pen, eraser, and fill tools
-  - Color picker and adjustable line width
-  - Automatic recognition after each stroke
-  - Markdown-formatted AI responses
 - **Multimodal Support**: Send images along with text prompts
 - **Streaming Responses**: See AI responses as they're generated with auto-scroll
 
