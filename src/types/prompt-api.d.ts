@@ -45,6 +45,43 @@ declare global {
   }
 
   const LanguageModel: LanguageModelAPI;
+
+  // Translator API
+  interface TranslatorCreateOptions {
+    sourceLanguage?: string;
+    targetLanguage: string;
+  }
+
+  interface Translator {
+    translate(text: string): Promise<string>;
+    destroy(): void;
+  }
+
+  interface TranslatorAPI {
+    availability(): Promise<string>;
+    create(options: TranslatorCreateOptions): Promise<Translator>;
+  }
+
+  const translation: TranslatorAPI;
+
+  // Summarizer API
+  interface SummarizerCreateOptions {
+    type?: 'tl;dr' | 'key-points' | 'teaser' | 'headline';
+    format?: 'plain-text' | 'markdown';
+    length?: 'short' | 'medium' | 'long';
+  }
+
+  interface Summarizer {
+    summarize(text: string): Promise<string>;
+    destroy(): void;
+  }
+
+  interface SummarizerAPI {
+    availability(): Promise<string>;
+    create(options?: SummarizerCreateOptions): Promise<Summarizer>;
+  }
+
+  const summarization: SummarizerAPI;
 }
 
 export {};
