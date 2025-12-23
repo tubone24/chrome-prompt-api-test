@@ -52,17 +52,17 @@ declare global {
     targetLanguage: string;
   }
 
-  interface Translator {
+  interface TranslatorSession {
     translate(text: string): Promise<string>;
     destroy(): void;
   }
 
   interface TranslatorAPI {
-    availability(): Promise<string>;
-    create(options: TranslatorCreateOptions): Promise<Translator>;
+    capabilities(): Promise<{ available: string }>;
+    create(options: TranslatorCreateOptions): Promise<TranslatorSession>;
   }
 
-  const translation: TranslatorAPI;
+  const Translator: TranslatorAPI;
 
   // Summarizer API
   interface SummarizerCreateOptions {
@@ -71,17 +71,17 @@ declare global {
     length?: 'short' | 'medium' | 'long';
   }
 
-  interface Summarizer {
+  interface SummarizerSession {
     summarize(text: string): Promise<string>;
     destroy(): void;
   }
 
   interface SummarizerAPI {
-    availability(): Promise<string>;
-    create(options?: SummarizerCreateOptions): Promise<Summarizer>;
+    capabilities(): Promise<{ available: string }>;
+    create(options?: SummarizerCreateOptions): Promise<SummarizerSession>;
   }
 
-  const summarization: SummarizerAPI;
+  const Summarizer: SummarizerAPI;
 }
 
 export {};
