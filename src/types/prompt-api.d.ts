@@ -16,13 +16,19 @@ declare global {
     ): void;
   }
 
+  interface LanguageModelPromptOptions {
+    signal?: AbortSignal;
+    responseConstraint?: Record<string, unknown> | RegExp;
+  }
+
   interface LanguageModelSession {
     prompt(
-      input: string | LanguageModelPromptInput[]
+      input: string | LanguageModelPromptInput[],
+      options?: LanguageModelPromptOptions
     ): Promise<string>;
     promptStreaming(
       input: string | LanguageModelPromptInput[],
-      options?: { signal?: AbortSignal }
+      options?: LanguageModelPromptOptions
     ): AsyncIterable<string>;
     destroy(): void;
     inputQuota?: number;
@@ -47,41 +53,62 @@ declare global {
   const LanguageModel: LanguageModelAPI;
 
   // Translator API
-  interface TranslatorLanguagePair {
+  interface TranslatorCreateOptions {
     sourceLanguage: string;
     targetLanguage: string;
+    monitor?: (monitor: TranslatorDownloadMonitor) => void;
+  }
+
+  interface TranslatorDownloadMonitor {
+    addEventListener(
+      type: 'downloadprogress',
+      callback: (event: { loaded: number; total: number }) => void
+    ): void;
   }
 
   interface TranslatorSession {
     translate(text: string): Promise<string>;
+    translateStreaming(text: string): AsyncIterable<string>;
     destroy(): void;
   }
 
-  interface TranslationAPI {
-    canTranslate(languagePair: TranslatorLanguagePair): Promise<string>;
-    createTranslator(languagePair: TranslatorLanguagePair): Promise<TranslatorSession>;
+  interface TranslatorAPI {
+    availability(options: { sourceLanguage: string; targetLanguage: string }): Promise<string>;
+    create(options: TranslatorCreateOptions): Promise<TranslatorSession>;
   }
 
-  const translation: TranslationAPI;
+  const Translator: TranslatorAPI;
 
   // Summarizer API
   interface SummarizerCreateOptions {
-    type?: 'tl;dr' | 'key-points' | 'teaser' | 'headline';
+    type?: 'tldr' | 'key-points' | 'teaser' | 'headline';
     format?: 'plain-text' | 'markdown';
     length?: 'short' | 'medium' | 'long';
+    sharedContext?: string;
+    expectedInputLanguages?: string[];
+    outputLanguage?: string;
+    monitor?: (monitor: SummarizerDownloadMonitor) => void;
+  }
+
+  interface SummarizerDownloadMonitor {
+    addEventListener(
+      type: 'downloadprogress',
+      callback: (event: { loaded: number; total: number }) => void
+    ): void;
   }
 
   interface SummarizerSession {
-    summarize(text: string): Promise<string>;
+    summarize(text: string, options?: { context?: string }): Promise<string>;
+    summarizeStreaming(text: string, options?: { context?: string }): AsyncIterable<string>;
     destroy(): void;
   }
 
-  interface SummarizationAPI {
-    canSummarize(): Promise<string>;
-    createSummarizer(options?: SummarizerCreateOptions): Promise<SummarizerSession>;
+  interface SummarizerAPI {
+    availability(): Promise<string>;
+    create(options?: SummarizerCreateOptions): Promise<SummarizerSession>;
   }
 
-  const summarization: SummarizationAPI;
+  const Summarizer: SummarizerAPI;
 }
 
 export {};
