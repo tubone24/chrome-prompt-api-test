@@ -52,16 +52,16 @@ export function VoiceTranscriptionPipeline() {
     }
 
     // Translation APIチェック
-    if (typeof Translator === 'undefined') {
+    if (typeof translation === 'undefined') {
       setStatus('unavailable');
-      setError('Translator APIが見つかりません');
+      setError('Translation APIが見つかりません');
       return;
     }
 
     // Summarization APIチェック
-    if (typeof Summarizer === 'undefined') {
+    if (typeof summarization === 'undefined') {
       setStatus('unavailable');
-      setError('Summarizer APIが見つかりません');
+      setError('Summarization APIが見つかりません');
       return;
     }
 
@@ -78,23 +78,26 @@ export function VoiceTranscriptionPipeline() {
         return;
       }
 
-      // Translation availability
-      const translatorCapabilities = await Translator.capabilities();
-      console.log('Translator API Capabilities:', translatorCapabilities);
+      // Translation availability - check with default language pair
+      const translationAvailability = await translation.canTranslate({
+        sourceLanguage: 'ja',
+        targetLanguage: 'en',
+      });
+      console.log('Translation API Availability:', translationAvailability);
 
-      if (translatorCapabilities.available !== 'readily' && translatorCapabilities.available !== 'available') {
+      if (translationAvailability !== 'readily' && translationAvailability !== 'available') {
         setStatus('unavailable');
-        setError(`翻訳API利用不可: ${translatorCapabilities.available}`);
+        setError(`翻訳API利用不可: ${translationAvailability}`);
         return;
       }
 
       // Summarization availability
-      const summarizerCapabilities = await Summarizer.capabilities();
-      console.log('Summarizer API Capabilities:', summarizerCapabilities);
+      const summarizationAvailability = await summarization.canSummarize();
+      console.log('Summarization API Availability:', summarizationAvailability);
 
-      if (summarizerCapabilities.available !== 'readily' && summarizerCapabilities.available !== 'available') {
+      if (summarizationAvailability !== 'readily' && summarizationAvailability !== 'available') {
         setStatus('unavailable');
-        setError(`要約API利用不可: ${summarizerCapabilities.available}`);
+        setError(`要約API利用不可: ${summarizationAvailability}`);
         return;
       }
 
@@ -175,7 +178,7 @@ export function VoiceTranscriptionPipeline() {
       );
 
       // ステップ2: 翻訳
-      translatorSession = await Translator.create({
+      translatorSession = await translation.createTranslator({
         sourceLanguage: 'ja',
         targetLanguage: targetLanguage,
       });
@@ -195,7 +198,7 @@ export function VoiceTranscriptionPipeline() {
       );
 
       // ステップ3: 要約
-      summarizerSession = await Summarizer.create({
+      summarizerSession = await summarization.createSummarizer({
         type: 'tl;dr',
         format: 'plain-text',
         length: 'short',

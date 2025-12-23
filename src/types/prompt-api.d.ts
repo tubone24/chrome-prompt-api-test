@@ -47,8 +47,8 @@ declare global {
   const LanguageModel: LanguageModelAPI;
 
   // Translator API
-  interface TranslatorCreateOptions {
-    sourceLanguage?: string;
+  interface TranslatorLanguagePair {
+    sourceLanguage: string;
     targetLanguage: string;
   }
 
@@ -57,12 +57,12 @@ declare global {
     destroy(): void;
   }
 
-  interface TranslatorAPI {
-    capabilities(): Promise<{ available: string }>;
-    create(options: TranslatorCreateOptions): Promise<TranslatorSession>;
+  interface TranslationAPI {
+    canTranslate(languagePair: TranslatorLanguagePair): Promise<string>;
+    createTranslator(languagePair: TranslatorLanguagePair): Promise<TranslatorSession>;
   }
 
-  const Translator: TranslatorAPI;
+  const translation: TranslationAPI;
 
   // Summarizer API
   interface SummarizerCreateOptions {
@@ -76,12 +76,12 @@ declare global {
     destroy(): void;
   }
 
-  interface SummarizerAPI {
-    capabilities(): Promise<{ available: string }>;
-    create(options?: SummarizerCreateOptions): Promise<SummarizerSession>;
+  interface SummarizationAPI {
+    canSummarize(): Promise<string>;
+    createSummarizer(options?: SummarizerCreateOptions): Promise<SummarizerSession>;
   }
 
-  const Summarizer: SummarizerAPI;
+  const summarization: SummarizationAPI;
 }
 
 export {};
