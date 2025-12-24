@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Languages, FileText, Download, Volume2 } from 'lucide-react';
+import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Languages, FileText, Download, Volume2, Clock, Layers } from 'lucide-react';
+import { useSemaphore } from '../hooks/useProcessingQueue';
 
 type Status = 'checking' | 'available' | 'unavailable' | 'recording' | 'downloading';
 
@@ -83,6 +84,17 @@ export function VoiceTranscriptionPipeline() {
   // GainNode参照
   const gainNodeRef = useRef<GainNode | null>(null);
   const timerRef = useRef<number | null>(null);
+
+  // 並列処理制御
+  const [maxConcurrentProcessing, setMaxConcurrentProcessing] = useState(2);
+  const processSemaphore = useSemaphore(maxConcurrentProcessing);
+  const [processingQueueSize, setProcessingQueueSize] = useState(0);
+  const [activeProcessingCount, setActiveProcessingCount] = useState(0);
+  const pendingChunksRef = useRef<Blob[]>([]);
+  const isProcessingQueueRef = useRef(false);
+
+  // 要約処理のデバウンス用
+  const summaryDebounceRef = useRef<number | null>(null);
 
   // 固定設定
   const MIN_RECORDING_DURATION = 500; // 最小録音時間（ms）
@@ -410,24 +422,8 @@ export function VoiceTranscriptionPipeline() {
     }
   }, [summarizeTextWithCheckpoint, enableSummarization]);
 
-  // 音声チャンクを処理（文字起こし→翻訳）
-  const processChunk = async (audioBlob: Blob) => {
-    if (audioBlob.size < 1000) {
-      console.log('Audio chunk too small, skipping:', audioBlob.size);
-      return;
-    }
-
-    const chunkId = crypto.randomUUID();
-
-    const newChunk: ProcessedChunk = {
-      id: chunkId,
-      timestamp: new Date(),
-      transcription: { text: '', isProcessing: true },
-      translation: { text: '', isProcessing: false },
-    };
-
-    setChunks(prev => [...prev, newChunk]);
-
+  // 音声チャンクを処理（文字起こし→翻訳）- セマフォで同時実行数を制御
+  const processChunkInternal = async (audioBlob: Blob, chunkId: string) => {
     let languageModelSession: LanguageModelSession | null = null;
     let translatorSession: TranslatorSession | null = null;
 
@@ -500,7 +496,7 @@ export function VoiceTranscriptionPipeline() {
             : c
         );
 
-        // 全テキストを収集して要約を更新
+        // 全テキストを収集して要約を更新（デバウンス処理）
         const allTranscriptions = updated
           .filter(c => c.transcription.text && !c.transcription.error)
           .map(c => c.transcription.text);
@@ -509,8 +505,14 @@ export function VoiceTranscriptionPipeline() {
           .filter(c => c.translation.text && !c.translation.error)
           .map(c => c.translation.text);
 
-        // 非同期で要約を更新
-        updateOverallSummaries(allTranscriptions, allTranslations, sourceLanguage, targetLanguage);
+        // デバウンスして要約を更新（頻繁な更新を防ぐ）
+        if (summaryDebounceRef.current) {
+          clearTimeout(summaryDebounceRef.current);
+        }
+        summaryDebounceRef.current = window.setTimeout(() => {
+          updateOverallSummaries(allTranscriptions, allTranslations, sourceLanguage, targetLanguage);
+          summaryDebounceRef.current = null;
+        }, 1000);
 
         return updated;
       });
@@ -538,6 +540,56 @@ export function VoiceTranscriptionPipeline() {
       if (translatorSession) translatorSession.destroy();
     }
   };
+
+  // キューからチャンクを処理
+  const processQueue = useCallback(async () => {
+    if (isProcessingQueueRef.current) return;
+    isProcessingQueueRef.current = true;
+
+    while (pendingChunksRef.current.length > 0) {
+      const audioBlob = pendingChunksRef.current.shift();
+      if (!audioBlob) continue;
+
+      setProcessingQueueSize(pendingChunksRef.current.length);
+
+      // セマフォで同時実行数を制限
+      await processSemaphore.withSemaphore(async () => {
+        setActiveProcessingCount(prev => prev + 1);
+        const chunkId = crypto.randomUUID();
+
+        const newChunk: ProcessedChunk = {
+          id: chunkId,
+          timestamp: new Date(),
+          transcription: { text: '', isProcessing: true },
+          translation: { text: '', isProcessing: false },
+        };
+        setChunks(prev => [...prev, newChunk]);
+
+        try {
+          await processChunkInternal(audioBlob, chunkId);
+        } finally {
+          setActiveProcessingCount(prev => Math.max(0, prev - 1));
+        }
+      });
+    }
+
+    isProcessingQueueRef.current = false;
+  }, [processSemaphore, sourceLanguage, targetLanguage]);
+
+  // 音声チャンクをキューに追加
+  const enqueueChunk = useCallback((audioBlob: Blob) => {
+    if (audioBlob.size < 1000) {
+      console.log('Audio chunk too small, skipping:', audioBlob.size);
+      return;
+    }
+
+    pendingChunksRef.current.push(audioBlob);
+    setProcessingQueueSize(pendingChunksRef.current.length);
+    console.log(`Enqueued chunk (queue size: ${pendingChunksRef.current.length})`);
+
+    // キュー処理を開始
+    processQueue();
+  }, [processQueue]);
 
   // 録音開始時刻を記録
   const recordingStartTimeRef = useRef<number>(0);
@@ -625,16 +677,17 @@ export function VoiceTranscriptionPipeline() {
 
       if (chunksRef.current.length > 0 && shouldProcess) {
         const audioBlob = new Blob(chunksRef.current, { type: mimeTypeRef.current });
-        console.log('Processing audio chunk:', audioBlob.size, 'bytes');
+        console.log('Enqueuing audio chunk:', audioBlob.size, 'bytes');
 
         if (audioBlob.size >= 1000) {
-          processChunk(audioBlob);
+          // キューに追加（並列処理制御）
+          enqueueChunk(audioBlob);
         } else {
           console.log('Audio chunk too small, skipping');
         }
       }
 
-      // 録音継続中なら次のチャンクを開始
+      // 録音継続中なら次のチャンクを開始（処理完了を待たずに即座に開始）
       if (isRecordingRef.current) {
         startNewRecorder();
       }
@@ -786,6 +839,14 @@ export function VoiceTranscriptionPipeline() {
     // チェックポイントもリセット
     transcriptionCheckpointRef.current = { summarizedUpTo: 0, previousSummary: '' };
     translationCheckpointRef.current = { summarizedUpTo: 0, previousSummary: '' };
+    // キューもクリア
+    pendingChunksRef.current = [];
+    setProcessingQueueSize(0);
+    // デバウンスタイマーもクリア
+    if (summaryDebounceRef.current) {
+      clearTimeout(summaryDebounceRef.current);
+      summaryDebounceRef.current = null;
+    }
   };
 
   return (
@@ -927,6 +988,44 @@ export function VoiceTranscriptionPipeline() {
                   <option value="medium">中程度</option>
                   <option value="long">長い</option>
                 </select>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 並列処理設定 */}
+        <div className="mt-4 pt-4 border-t border-[hsl(var(--border))]">
+          <h3 className="text-xs font-medium text-[hsl(var(--muted-foreground))] flex items-center gap-1 mb-3">
+            <Layers className="w-3 h-3" />
+            並列処理設定
+          </h3>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-[hsl(var(--muted-foreground))]">同時処理数:</span>
+              <select
+                value={maxConcurrentProcessing}
+                onChange={(e) => setMaxConcurrentProcessing(parseInt(e.target.value))}
+                disabled={isRecording}
+                className="px-2 py-1 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--background))] text-[hsl(var(--foreground))] text-xs disabled:opacity-50"
+              >
+                <option value="1">1（順次処理）</option>
+                <option value="2">2（デフォルト）</option>
+                <option value="3">3</option>
+                <option value="4">4（高速）</option>
+              </select>
+            </div>
+            {(processingQueueSize > 0 || activeProcessingCount > 0) && (
+              <div className="flex items-center gap-3 text-xs">
+                <span className="flex items-center gap-1 text-blue-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  処理中: {activeProcessingCount}
+                </span>
+                {processingQueueSize > 0 && (
+                  <span className="flex items-center gap-1 text-yellow-400">
+                    <Clock className="w-3 h-3" />
+                    待機中: {processingQueueSize}
+                  </span>
+                )}
               </div>
             )}
           </div>

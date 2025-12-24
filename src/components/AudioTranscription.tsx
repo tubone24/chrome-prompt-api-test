@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Volume2 } from 'lucide-react';
+import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Volume2, Clock, Layers } from 'lucide-react';
+import { useSemaphore } from '../hooks/useProcessingQueue';
 
 type Status = 'checking' | 'available' | 'unavailable' | 'recording';
 
@@ -46,6 +47,14 @@ export function AudioTranscription() {
   const recordingStartTimeRef = useRef<number>(0);
   const gainNodeRef = useRef<GainNode | null>(null);
   const timerRef = useRef<number | null>(null);
+
+  // 並列処理制御
+  const [maxConcurrentProcessing, setMaxConcurrentProcessing] = useState(2);
+  const processSemaphore = useSemaphore(maxConcurrentProcessing);
+  const [processingQueueSize, setProcessingQueueSize] = useState(0);
+  const [activeProcessingCount, setActiveProcessingCount] = useState(0);
+  const pendingChunksRef = useRef<Blob[]>([]);
+  const isProcessingQueueRef = useRef(false);
 
   // 固定設定
   const MIN_RECORDING_DURATION = 500; // 最小録音時間（ms）
@@ -167,23 +176,8 @@ export function AudioTranscription() {
     return trimmed;
   };
 
-  // 音声チャンクを文字起こし（毎回新しいセッションを作成）
-  const transcribeChunk = async (audioBlob: Blob) => {
-    // サイズチェック
-    if (audioBlob.size < 1000) {
-      console.log('Audio chunk too small, skipping:', audioBlob.size);
-      return;
-    }
-
-    const chunkId = crypto.randomUUID();
-
-    setTranscripts(prev => [...prev, {
-      id: chunkId,
-      text: '',
-      timestamp: new Date(),
-      isProcessing: true,
-    }]);
-
+  // 音声チャンクを文字起こし（セマフォで同時実行数を制御）
+  const transcribeChunkInternal = async (audioBlob: Blob, chunkId: string) => {
     let session: LanguageModelSession | null = null;
 
     try {
@@ -248,6 +242,55 @@ export function AudioTranscription() {
       }
     }
   };
+
+  // キューからチャンクを処理
+  const processQueue = useCallback(async () => {
+    if (isProcessingQueueRef.current) return;
+    isProcessingQueueRef.current = true;
+
+    while (pendingChunksRef.current.length > 0) {
+      const audioBlob = pendingChunksRef.current.shift();
+      if (!audioBlob) continue;
+
+      setProcessingQueueSize(pendingChunksRef.current.length);
+
+      // セマフォで同時実行数を制限
+      await processSemaphore.withSemaphore(async () => {
+        setActiveProcessingCount(prev => prev + 1);
+        const chunkId = crypto.randomUUID();
+
+        setTranscripts(prev => [...prev, {
+          id: chunkId,
+          text: '',
+          timestamp: new Date(),
+          isProcessing: true,
+        }]);
+
+        try {
+          await transcribeChunkInternal(audioBlob, chunkId);
+        } finally {
+          setActiveProcessingCount(prev => Math.max(0, prev - 1));
+        }
+      });
+    }
+
+    isProcessingQueueRef.current = false;
+  }, [processSemaphore]);
+
+  // 音声チャンクをキューに追加
+  const enqueueChunk = useCallback((audioBlob: Blob) => {
+    if (audioBlob.size < 1000) {
+      console.log('Audio chunk too small, skipping:', audioBlob.size);
+      return;
+    }
+
+    pendingChunksRef.current.push(audioBlob);
+    setProcessingQueueSize(pendingChunksRef.current.length);
+    console.log(`Enqueued chunk (queue size: ${pendingChunksRef.current.length})`);
+
+    // キュー処理を開始
+    processQueue();
+  }, [processQueue]);
 
   // 音声レベルを監視
   const startAudioAnalysis = () => {
@@ -344,16 +387,17 @@ export function AudioTranscription() {
       const shouldProcess = recordingMode === 'fixed' || hasSpokenRef.current;
       if (chunksRef.current.length > 0 && shouldProcess) {
         const audioBlob = new Blob(chunksRef.current, { type: mimeTypeRef.current });
-        console.log('Processing complete audio chunk:', audioBlob.size, 'bytes');
+        console.log('Enqueuing audio chunk:', audioBlob.size, 'bytes');
 
         if (audioBlob.size >= 1000) {
-          transcribeChunk(audioBlob);
+          // キューに追加（並列処理制御）
+          enqueueChunk(audioBlob);
         } else {
           console.log('Audio chunk too small, skipping');
         }
       }
 
-      // まだ録音中なら新しいレコーダーを開始
+      // まだ録音中なら新しいレコーダーを開始（処理完了を待たずに即座に開始）
       if (isRecordingRef.current) {
         startNewRecorder();
       }
@@ -497,6 +541,9 @@ export function AudioTranscription() {
 
   const clearTranscripts = () => {
     setTranscripts([]);
+    // キューもクリア
+    pendingChunksRef.current = [];
+    setProcessingQueueSize(0);
   };
 
   const getFullTranscript = () => {
@@ -594,6 +641,44 @@ export function AudioTranscription() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* 並列処理設定 */}
+      <div className="p-4 border-b border-[hsl(var(--border))] bg-[hsl(var(--secondary)/0.3)]">
+        <h3 className="text-xs font-medium text-[hsl(var(--muted-foreground))] flex items-center gap-1 mb-3">
+          <Layers className="w-3 h-3" />
+          並列処理設定
+        </h3>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-[hsl(var(--muted-foreground))]">同時処理数:</span>
+            <select
+              value={maxConcurrentProcessing}
+              onChange={(e) => setMaxConcurrentProcessing(parseInt(e.target.value))}
+              disabled={isRecording}
+              className="px-2 py-1 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--background))] text-[hsl(var(--foreground))] text-xs disabled:opacity-50"
+            >
+              <option value="1">1（順次処理）</option>
+              <option value="2">2（デフォルト）</option>
+              <option value="3">3</option>
+              <option value="4">4（高速）</option>
+            </select>
+          </div>
+          {(processingQueueSize > 0 || activeProcessingCount > 0) && (
+            <div className="flex items-center gap-3 text-xs">
+              <span className="flex items-center gap-1 text-blue-400">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                処理中: {activeProcessingCount}
+              </span>
+              {processingQueueSize > 0 && (
+                <span className="flex items-center gap-1 text-yellow-400">
+                  <Clock className="w-3 h-3" />
+                  待機中: {processingQueueSize}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 音声設定（VADモード時のみ詳細表示） */}
