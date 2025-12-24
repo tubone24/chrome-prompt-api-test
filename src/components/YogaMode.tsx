@@ -14,10 +14,9 @@ import { YogaPoseView } from './YogaPoseView';
 import { usePromptAPI, type Message } from '../hooks/usePromptAPI';
 import {
   YOGA_POSES,
-  type YogaPose,
-  type PoseAnalysisResult,
   generateAnalysisSummary,
 } from '../utils/yogaPoseAnalysis';
+import type { YogaPose, PoseAnalysisResult } from '../utils/yogaPoseAnalysis';
 
 const SYSTEM_PROMPT = `あなたはヨガインストラクターのAIアシスタントです。
 ユーザーのヨガポーズを分析した結果が画像とともに送られてきます。
@@ -177,7 +176,7 @@ ${summary}
   return (
     <div className="h-full flex flex-col">
       {/* ヘッダー */}
-      <div className="p-4 border-b border-[hsl(var(--border))] flex items-center justify-between">
+      <div className="p-4 border-b border-[hsl(var(--border))] flex items-center justify-between shrink-0">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-[hsl(var(--foreground))]">
             ヨガポーズ解析
@@ -195,192 +194,236 @@ ${summary}
 
       {/* エラー表示 */}
       {error && status === 'unavailable' && (
-        <div className="p-4 bg-red-500/10 border-b border-red-500/20">
+        <div className="p-4 bg-red-500/10 border-b border-red-500/20 shrink-0">
           <p className="text-red-400 text-sm">{error}</p>
         </div>
       )}
 
-      {/* メインコンテンツ */}
-      <div className="flex-1 overflow-auto p-4 space-y-4">
-        {/* ポーズ選択 */}
-        <div className="bg-[hsl(var(--secondary)/0.3)] rounded-lg p-4">
-          <h3 className="text-sm font-medium text-[hsl(var(--foreground))] mb-3">
-            練習するポーズを選択
-          </h3>
-          <div className="relative">
-            <button
-              onClick={() => setIsPoseSelectOpen(!isPoseSelectOpen)}
-              className="w-full flex items-center justify-between p-3 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-lg hover:border-[hsl(var(--primary))] transition-colors"
-            >
-              <span className="text-[hsl(var(--foreground))]">
-                {selectedPose ? selectedPose.nameJa : 'ポーズを選択してください'}
-              </span>
-              <ChevronDown
-                className={`w-5 h-5 text-[hsl(var(--muted-foreground))] transition-transform ${
-                  isPoseSelectOpen ? 'rotate-180' : ''
-                }`}
-              />
-            </button>
-            {isPoseSelectOpen && (
-              <div className="absolute z-10 w-full mt-2 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-lg shadow-lg overflow-hidden">
-                {YOGA_POSES.map((pose) => (
+      {/* メインコンテンツ - 2カラムレイアウト */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* 左カラム: カメラ・操作 */}
+        <div className="flex-1 overflow-auto p-4 space-y-4">
+          {/* ポーズ選択 */}
+          <div className="bg-[hsl(var(--secondary)/0.3)] rounded-lg p-4">
+            <h3 className="text-sm font-medium text-[hsl(var(--foreground))] mb-3">
+              練習するポーズを選択
+            </h3>
+            <div className="relative">
+              <button
+                onClick={() => setIsPoseSelectOpen(!isPoseSelectOpen)}
+                className="w-full flex items-center justify-between p-3 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-lg hover:border-[hsl(var(--primary))] transition-colors"
+              >
+                <span className="text-[hsl(var(--foreground))]">
+                  {selectedPose ? selectedPose.nameJa : 'ポーズを選択してください'}
+                </span>
+                <ChevronDown
+                  className={`w-5 h-5 text-[hsl(var(--muted-foreground))] transition-transform ${
+                    isPoseSelectOpen ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+              {isPoseSelectOpen && (
+                <div className="absolute z-10 w-full mt-2 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded-lg shadow-lg overflow-hidden max-h-64 overflow-y-auto">
+                  {YOGA_POSES.map((pose) => (
+                    <button
+                      key={pose.id}
+                      onClick={() => {
+                        setSelectedPose(pose);
+                        setIsPoseSelectOpen(false);
+                        stopAutoAnalysis();
+                        clearMessages();
+                      }}
+                      className={`w-full text-left p-3 hover:bg-[hsl(var(--secondary))] transition-colors ${
+                        selectedPose?.id === pose.id
+                          ? 'bg-[hsl(var(--primary)/0.1)] text-[hsl(var(--primary))]'
+                          : 'text-[hsl(var(--foreground))]'
+                      }`}
+                    >
+                      <div className="font-medium">{pose.nameJa}</div>
+                      <div className="text-xs text-[hsl(var(--muted-foreground))] mt-1">
+                        {pose.description}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ポーズ指示 */}
+          {selectedPose && (
+            <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-lg p-4 border border-purple-500/20">
+              <h3 className="text-lg font-bold text-[hsl(var(--foreground))] mb-2">
+                {selectedPose.nameJa}をしてください
+              </h3>
+              <p className="text-[hsl(var(--muted-foreground))] text-sm mb-3">
+                {selectedPose.description}
+              </p>
+              <div className="text-sm text-[hsl(var(--foreground))]">
+                <strong>ポイント:</strong>
+                <ul className="list-disc list-inside mt-1 space-y-1 text-[hsl(var(--muted-foreground))]">
+                  {selectedPose.tips.map((tip, i) => (
+                    <li key={i}>{tip}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {/* カメラビュー */}
+          <YogaPoseView
+            selectedPose={selectedPose}
+            onAnalysisResult={handleAnalysisResult}
+            onCanvasReady={handleCanvasReady}
+            isActive={status === 'available' || status === 'downloading'}
+          />
+
+          {/* 解析コントロール */}
+          {selectedPose && canvasElement && (
+            <div className="flex gap-3 justify-center">
+              {!isAnalyzing ? (
+                <>
                   <button
-                    key={pose.id}
-                    onClick={() => {
-                      setSelectedPose(pose);
-                      setIsPoseSelectOpen(false);
-                      stopAutoAnalysis();
-                      clearMessages();
-                    }}
-                    className={`w-full text-left p-3 hover:bg-[hsl(var(--secondary))] transition-colors ${
-                      selectedPose?.id === pose.id
-                        ? 'bg-[hsl(var(--primary)/0.1)] text-[hsl(var(--primary))]'
-                        : 'text-[hsl(var(--foreground))]'
+                    onClick={requestAdvice}
+                    disabled={!analysisResult || isGenerating || status !== 'available'}
+                    className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg"
+                  >
+                    <Play className="w-5 h-5" />
+                    AIにアドバイスを求める
+                  </button>
+                  <button
+                    onClick={startAutoAnalysis}
+                    disabled={!analysisResult || status !== 'available'}
+                    className="flex items-center gap-2 px-6 py-3 bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] rounded-xl hover:bg-[hsl(var(--secondary)/0.8)] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  >
+                    自動解析開始
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => {
+                    stopAutoAnalysis();
+                    stopGeneration();
+                  }}
+                  className="flex items-center gap-2 px-6 py-3 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-all shadow-lg"
+                >
+                  <Square className="w-5 h-5" />
+                  自動解析停止
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* AIからのメッセージ */}
+          {messages.length > 0 && (
+            <div className="space-y-4">
+              <h3 className="text-sm font-medium text-[hsl(var(--foreground))]">
+                AIからのアドバイス
+              </h3>
+              {messages.map((message) => (
+                <MessageBubble key={message.id} message={message} />
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+
+        {/* 右カラム: リアルタイム解析結果 */}
+        <div className="w-80 border-l border-[hsl(var(--border))] bg-[hsl(var(--secondary)/0.2)] overflow-auto shrink-0">
+          <div className="p-4">
+            <h3 className="text-sm font-medium text-[hsl(var(--foreground))] mb-4">
+              リアルタイム解析
+            </h3>
+
+            {!analysisResult ? (
+              <div className="text-center py-8 text-[hsl(var(--muted-foreground))] text-sm">
+                <p>ポーズを選択してカメラを起動すると</p>
+                <p>ここに解析結果が表示されます</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* スコア */}
+                <div className="text-center p-4 bg-[hsl(var(--background))] rounded-lg">
+                  <div className="text-xs text-[hsl(var(--muted-foreground))] mb-1">
+                    総合スコア
+                  </div>
+                  <div
+                    className={`text-4xl font-bold ${
+                      analysisResult.overallScore >= 80
+                        ? 'text-green-400'
+                        : analysisResult.overallScore >= 50
+                        ? 'text-yellow-400'
+                        : 'text-red-400'
                     }`}
                   >
-                    <div className="font-medium">{pose.nameJa}</div>
-                    <div className="text-xs text-[hsl(var(--muted-foreground))] mt-1">
-                      {pose.description}
-                    </div>
-                  </button>
-                ))}
+                    {analysisResult.overallScore}
+                    <span className="text-lg text-[hsl(var(--muted-foreground))]">点</span>
+                  </div>
+                </div>
+
+                {/* 関節角度 */}
+                <div>
+                  <h4 className="text-xs font-medium text-[hsl(var(--muted-foreground))] mb-2">
+                    各関節の角度
+                  </h4>
+                  <div className="space-y-2">
+                    {analysisResult.angleAnalysis.map((angle) => (
+                      <div
+                        key={angle.name}
+                        className={`p-2 rounded text-sm ${
+                          angle.status === 'good'
+                            ? 'bg-green-500/20 border border-green-500/30'
+                            : angle.status === 'warning'
+                            ? 'bg-yellow-500/20 border border-yellow-500/30'
+                            : 'bg-red-500/20 border border-red-500/30'
+                        }`}
+                      >
+                        <div className="flex justify-between items-center">
+                          <span
+                            className={`font-medium ${
+                              angle.status === 'good'
+                                ? 'text-green-300'
+                                : angle.status === 'warning'
+                                ? 'text-yellow-300'
+                                : 'text-red-300'
+                            }`}
+                          >
+                            {angle.name}
+                          </span>
+                          <span className="text-xs text-[hsl(var(--muted-foreground))]">
+                            {angle.status === 'good'
+                              ? '良好'
+                              : angle.status === 'warning'
+                              ? '調整中'
+                              : '要修正'}
+                          </span>
+                        </div>
+                        <div className="text-xs text-[hsl(var(--muted-foreground))] mt-1">
+                          現在: {angle.currentAngle}° / 理想: {angle.idealAngle}°
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* フィードバック */}
+                <div>
+                  <h4 className="text-xs font-medium text-[hsl(var(--muted-foreground))] mb-2">
+                    フィードバック
+                  </h4>
+                  <div className="text-sm text-[hsl(var(--foreground))] space-y-2 bg-[hsl(var(--background))] rounded-lg p-3">
+                    {analysisResult.feedback.map((fb, i) => (
+                      <div key={i} className="flex items-start gap-2">
+                        <span className="text-purple-400 shrink-0">•</span>
+                        <span className="text-[hsl(var(--muted-foreground))]">{fb}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
           </div>
         </div>
-
-        {/* ポーズ指示 */}
-        {selectedPose && (
-          <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-lg p-4 border border-purple-500/20">
-            <h3 className="text-lg font-bold text-[hsl(var(--foreground))] mb-2">
-              {selectedPose.nameJa}をしてください
-            </h3>
-            <p className="text-[hsl(var(--muted-foreground))] text-sm mb-3">
-              {selectedPose.description}
-            </p>
-            <div className="text-sm text-[hsl(var(--foreground))]">
-              <strong>ポイント:</strong>
-              <ul className="list-disc list-inside mt-1 space-y-1 text-[hsl(var(--muted-foreground))]">
-                {selectedPose.tips.map((tip, i) => (
-                  <li key={i}>{tip}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
-
-        {/* カメラビュー */}
-        <YogaPoseView
-          selectedPose={selectedPose}
-          onAnalysisResult={handleAnalysisResult}
-          onCanvasReady={handleCanvasReady}
-          isActive={status === 'available' || status === 'downloading'}
-        />
-
-        {/* リアルタイム解析結果 */}
-        {analysisResult && (
-          <div className="bg-[hsl(var(--secondary)/0.3)] rounded-lg p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-medium text-[hsl(var(--foreground))]">
-                リアルタイム解析
-              </h3>
-              <div className="flex items-center gap-2">
-                <span
-                  className={`text-2xl font-bold ${
-                    analysisResult.overallScore >= 80
-                      ? 'text-green-400'
-                      : analysisResult.overallScore >= 50
-                      ? 'text-yellow-400'
-                      : 'text-red-400'
-                  }`}
-                >
-                  {analysisResult.overallScore}点
-                </span>
-              </div>
-            </div>
-
-            {/* 関節角度 */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
-              {analysisResult.angleAnalysis.map((angle) => (
-                <div
-                  key={angle.name}
-                  className={`p-2 rounded text-sm ${
-                    angle.status === 'good'
-                      ? 'bg-green-500/20 text-green-300'
-                      : angle.status === 'warning'
-                      ? 'bg-yellow-500/20 text-yellow-300'
-                      : 'bg-red-500/20 text-red-300'
-                  }`}
-                >
-                  <div className="font-medium">{angle.name}</div>
-                  <div className="text-xs">
-                    {angle.currentAngle}° / {angle.idealAngle}°
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* フィードバック */}
-            <div className="text-sm text-[hsl(var(--muted-foreground))] space-y-1">
-              {analysisResult.feedback.map((fb, i) => (
-                <div key={i} className="flex items-start gap-2">
-                  <span className="text-purple-400">•</span>
-                  <span>{fb}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* 解析コントロール */}
-        {selectedPose && canvasElement && (
-          <div className="flex gap-3 justify-center">
-            {!isAnalyzing ? (
-              <>
-                <button
-                  onClick={requestAdvice}
-                  disabled={!analysisResult || isGenerating || status !== 'available'}
-                  className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg"
-                >
-                  <Play className="w-5 h-5" />
-                  AIにアドバイスを求める
-                </button>
-                <button
-                  onClick={startAutoAnalysis}
-                  disabled={!analysisResult || status !== 'available'}
-                  className="flex items-center gap-2 px-6 py-3 bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] rounded-xl hover:bg-[hsl(var(--secondary)/0.8)] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                >
-                  自動解析開始
-                </button>
-              </>
-            ) : (
-              <button
-                onClick={() => {
-                  stopAutoAnalysis();
-                  stopGeneration();
-                }}
-                className="flex items-center gap-2 px-6 py-3 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-all shadow-lg"
-              >
-                <Square className="w-5 h-5" />
-                自動解析停止
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* AIからのメッセージ */}
-        {messages.length > 0 && (
-          <div className="space-y-4">
-            <h3 className="text-sm font-medium text-[hsl(var(--foreground))]">
-              AIからのアドバイス
-            </h3>
-            {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
-          </div>
-        )}
-
-        <div ref={messagesEndRef} />
       </div>
     </div>
   );

@@ -1,13 +1,13 @@
 # Chrome Prompt API Demo
 
-A React application demonstrating Chrome's built-in Prompt API with Gemini Nano. Features text chat, real-time camera recognition, audio transcription, and interactive paint recognition modes.
+A React application demonstrating Chrome's built-in Prompt API with Gemini Nano. Features text chat, real-time camera recognition, audio transcription, interactive paint recognition, and yoga pose analysis modes.
 
 ## DEMO
 
 ### Describing what appears in the video
 ![demo](./docs/images/demo.gif)
 
-### Text Chat 
+### Text Chat
 ![demo](./docs/images/demo-chat.gif)
 
 ### Realtime Transcription
@@ -22,6 +22,7 @@ A React application demonstrating Chrome's built-in Prompt API with Gemini Nano.
 - **Camera Recognition Mode**: Real-time image recognition with auto-capture
 - **Audio Transcription Mode**: Real-time speech-to-text transcription
 - **Paint Recognition Mode**: Draw on canvas and get AI to recognize your drawings
+- **Yoga Pose Analysis Mode**: Real-time yoga pose detection and AI coaching using MediaPipe
 - **Multimodal Support**: Send images along with text prompts
 - **Streaming Responses**: See AI responses as they're generated with auto-scroll
 
@@ -102,6 +103,24 @@ npm run build
 7. View AI responses in the right panel with Markdown formatting
 8. Use the "Clear" button to start over
 
+### Yoga Pose Analysis Mode
+
+1. Switch to the "Yoga" tab
+2. Select a yoga pose from the dropdown:
+   - **Downward-Facing Dog** (ダウンドッグ)
+   - **Warrior I** (戦士のポーズ1)
+   - **Warrior II** (戦士のポーズ2)
+   - **Tree Pose** (木のポーズ)
+   - **Triangle Pose** (三角のポーズ)
+3. Click "Start Camera" to enable your webcam
+4. Position yourself so your full body is visible
+5. The right panel shows real-time analysis:
+   - Overall score (0-100)
+   - Individual joint angles with color-coded status
+   - Instant feedback on your form
+6. Click "Ask AI for Advice" for detailed coaching tips
+7. Use "Start Auto Analysis" for continuous AI feedback every 10 seconds
+
 ## Tech Stack
 
 - React 19
@@ -110,6 +129,7 @@ npm run build
 - Tailwind CSS v4
 - Lucide React (icons)
 - React Markdown (for AI response rendering)
+- MediaPipe Tasks Vision (for pose detection)
 
 ## Project Structure
 
@@ -121,12 +141,16 @@ src/
 │   ├── ChatInput.tsx           # Input form with camera capture
 │   ├── CameraView.tsx          # Camera preview component
 │   ├── AudioTranscription.tsx  # Audio transcription component
-│   └── PaintCanvas.tsx         # Interactive paint tool with AI recognition
+│   ├── PaintCanvas.tsx         # Interactive paint tool with AI recognition
+│   ├── YogaMode.tsx            # Yoga pose analysis main component
+│   └── YogaPoseView.tsx        # Camera + MediaPipe pose detection
 ├── hooks/
 │   └── usePromptAPI.ts         # Chrome Prompt API integration
+├── utils/
+│   └── yogaPoseAnalysis.ts     # Pose analysis utilities and definitions
 ├── types/
 │   └── prompt-api.d.ts         # TypeScript definitions
-├── App.tsx                     # Tab switching (Text, Camera, Audio, Paint)
+├── App.tsx                     # Tab switching (Text, Camera, Audio, Paint, Yoga)
 ├── main.tsx
 └── index.css                   # Tailwind CSS
 ```
