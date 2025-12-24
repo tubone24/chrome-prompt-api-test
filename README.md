@@ -16,6 +16,9 @@ A React application demonstrating Chrome's built-in Prompt API with Gemini Nano.
 ### Paint Recognition
 ![demo](./docs/images/demo-paint.gif)
 
+### Yoga Pose Analysis
+![demo](./docs/images/demo-yoga.gif)
+
 ## Features
 
 - **Text Chat Mode**: Chat with Gemini Nano using streaming responses
