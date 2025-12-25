@@ -193,8 +193,9 @@ export function WhisperTranscription() {
       const result = await transcribe({
         model: selectedModel,
         channelWaveform: waveform,
-        language: 'japanese',
+        language: 'auto',
         logLevel: 'verbose',
+        threads: 1,
         onProgress: (p) => {
           console.log('Transcription progress:', p);
         },
