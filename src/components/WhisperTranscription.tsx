@@ -172,11 +172,13 @@ export function WhisperTranscription() {
 
     try {
       // 16kHzにリサンプル（BlobをそのままAPIに渡す）
-      console.log('Resampling audio, blob size:', audioBlob.size);
+      console.log('Resampling audio, blob size:', audioBlob.size, 'type:', audioBlob.type);
       const waveform = await resampleTo16Khz({
         file: audioBlob,
+        logLevel: 'verbose',
         onProgress: (p) => console.log('Resample progress:', p),
       });
+      console.log('Resampled waveform length:', waveform.length);
 
       const durationSeconds = waveform.length / 16000;
       console.log(
@@ -191,7 +193,8 @@ export function WhisperTranscription() {
       const result = await transcribe({
         model: selectedModel,
         channelWaveform: waveform,
-        language: 'ja',
+        language: 'japanese',
+        logLevel: 'verbose',
         onProgress: (p) => {
           console.log('Transcription progress:', p);
         },
