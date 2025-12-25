@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { MessageSquare, Camera, Mic, Paintbrush, Zap, PersonStanding } from 'lucide-react';
+import { MessageSquare, Camera, Mic, Paintbrush, Zap, PersonStanding, AudioLines } from 'lucide-react';
 import { Chat } from './components/Chat';
 import { AudioTranscription } from './components/AudioTranscription';
 import { PaintCanvas } from './components/PaintCanvas';
 import { VoiceTranscriptionPipeline } from './components/VoiceTranscriptionPipeline';
 import { YogaMode } from './components/YogaMode';
+import { WhisperTranscription } from './components/WhisperTranscription';
 
-type Mode = 'text' | 'camera' | 'audio' | 'paint' | 'voice-pipeline' | 'yoga';
+type Mode = 'text' | 'camera' | 'audio' | 'paint' | 'voice-pipeline' | 'yoga' | 'whisper';
 
 function App() {
   const [mode, setMode] = useState<Mode>('text');
@@ -81,6 +82,17 @@ function App() {
           <PersonStanding className="w-4 h-4" />
           ヨガ
         </button>
+        <button
+          onClick={() => setMode('whisper')}
+          className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 text-sm font-medium transition-colors ${
+            mode === 'whisper'
+              ? 'text-[hsl(var(--primary))] border-b-2 border-[hsl(var(--primary))] bg-[hsl(var(--primary)/0.1)]'
+              : 'text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.5)]'
+          }`}
+        >
+          <AudioLines className="w-4 h-4" />
+          Whisper
+        </button>
       </div>
 
       {/* Content */}
@@ -91,6 +103,7 @@ function App() {
         {mode === 'paint' && <PaintCanvas key="paint" />}
         {mode === 'voice-pipeline' && <VoiceTranscriptionPipeline key="voice-pipeline" />}
         {mode === 'yoga' && <YogaMode key="yoga" />}
+        {mode === 'whisper' && <WhisperTranscription key="whisper" />}
       </div>
     </div>
   );
