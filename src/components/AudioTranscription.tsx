@@ -1,7 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Volume2 } from 'lucide-react';
+import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Volume2, Monitor, MonitorSpeaker } from 'lucide-react';
 
 type Status = 'checking' | 'available' | 'unavailable' | 'recording';
+
+// 音声ソースタイプ
+type AudioSource = 'microphone' | 'system' | 'both';
 
 interface TranscriptChunk {
   id: string;
@@ -46,6 +49,12 @@ export function AudioTranscription() {
   const recordingStartTimeRef = useRef<number>(0);
   const gainNodeRef = useRef<GainNode | null>(null);
   const timerRef = useRef<number | null>(null);
+
+  // 音声ソース設定
+  const [audioSource, setAudioSource] = useState<AudioSource>('microphone');
+  const systemStreamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const mixedStreamRef = useRef<MediaStream | null>(null);
 
   // 固定設定
   const MIN_RECORDING_DURATION = 500; // 最小録音時間（ms）
@@ -305,6 +314,80 @@ export function AudioTranscription() {
     analyze();
   };
 
+  // システム音声ストリームを取得
+  const getSystemAudioStream = async (): Promise<MediaStream> => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true, // getDisplayMediaにはvideo: trueが必須
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        }
+      });
+
+      // ビデオトラックは不要なので停止
+      stream.getVideoTracks().forEach(track => track.stop());
+
+      // 音声トラックのみを含む新しいストリームを作成
+      const audioOnlyStream = new MediaStream(stream.getAudioTracks());
+      return audioOnlyStream;
+    } catch (e) {
+      console.error('Failed to get system audio:', e);
+      throw new Error('システム音声の取得に失敗しました。画面共有を許可してください。');
+    }
+  };
+
+  // マイクストリームを取得
+  const getMicrophoneStream = async (): Promise<MediaStream> => {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        sampleRate: 16000,
+      }
+    });
+  };
+
+  // 複数のオーディオストリームを混合
+  const mixAudioStreams = (streams: MediaStream[]): MediaStream => {
+    const audioContext = new AudioContext();
+    const destination = audioContext.createMediaStreamDestination();
+
+    streams.forEach(stream => {
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(destination);
+    });
+
+    audioContextRef.current = audioContext;
+    return destination.stream;
+  };
+
+  // 音声ストリームを設定
+  const setupAudioStream = async (): Promise<MediaStream> => {
+    let finalStream: MediaStream;
+
+    if (audioSource === 'microphone') {
+      finalStream = await getMicrophoneStream();
+      micStreamRef.current = finalStream;
+    } else if (audioSource === 'system') {
+      finalStream = await getSystemAudioStream();
+      systemStreamRef.current = finalStream;
+    } else {
+      // 両方を混合
+      const [micStream, sysStream] = await Promise.all([
+        getMicrophoneStream(),
+        getSystemAudioStream()
+      ]);
+      micStreamRef.current = micStream;
+      systemStreamRef.current = sysStream;
+      finalStream = mixAudioStreams([micStream, sysStream]);
+      mixedStreamRef.current = finalStream;
+    }
+
+    return finalStream;
+  };
+
   // 新しいMediaRecorderを作成（音声検出ベース or 固定時間）
   const startNewRecorder = () => {
     if (!streamRef.current || !isRecordingRef.current) return;
@@ -394,28 +477,31 @@ export function AudioTranscription() {
   // 録音開始
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 16000,
-        }
-      });
+      // 音声ソースを設定
+      const stream = await setupAudioStream();
       streamRef.current = stream;
 
-      // AudioContextとAnalyserNode、GainNodeをセットアップ
-      audioContextRef.current = new AudioContext();
-      analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 256;
-      analyserRef.current.smoothingTimeConstant = 0.8;
+      // AudioContextが既にセットアップされている場合（mixAudioStreamsで作成）はスキップ
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+
+      // AnalyserNodeをセットアップ
+      if (!analyserRef.current) {
+        analyserRef.current = audioContextRef.current.createAnalyser();
+        analyserRef.current.fftSize = 256;
+        analyserRef.current.smoothingTimeConstant = 0.8;
+      }
 
       // GainNodeを作成してゲインを適用
-      gainNodeRef.current = audioContextRef.current.createGain();
-      gainNodeRef.current.gain.value = inputGain;
+      if (!gainNodeRef.current) {
+        gainNodeRef.current = audioContextRef.current.createGain();
+        gainNodeRef.current.gain.value = inputGain;
 
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      source.connect(gainNodeRef.current);
-      gainNodeRef.current.connect(analyserRef.current);
+        const source = audioContextRef.current.createMediaStreamSource(stream);
+        source.connect(gainNodeRef.current);
+        gainNodeRef.current.connect(analyserRef.current);
+      }
 
       // サポートされているMIMEタイプを確認
       mimeTypeRef.current = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -425,6 +511,7 @@ export function AudioTranscription() {
           : 'audio/mp4';
 
       console.log('Using MIME type:', mimeTypeRef.current);
+      console.log('Audio source:', audioSource);
 
       setIsRecording(true);
       isRecordingRef.current = true;
@@ -434,7 +521,7 @@ export function AudioTranscription() {
       startNewRecorder();
     } catch (e) {
       console.error('Recording error:', e);
-      setError(e instanceof Error ? e.message : 'マイクにアクセスできません');
+      setError(e instanceof Error ? e.message : '音声入力にアクセスできません');
     }
   };
 
@@ -464,10 +551,27 @@ export function AudioTranscription() {
       audioContextRef.current = null;
     }
 
+    // 全てのストリームを停止
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(track => track.stop());
+      micStreamRef.current = null;
+    }
+    if (systemStreamRef.current) {
+      systemStreamRef.current.getTracks().forEach(track => track.stop());
+      systemStreamRef.current = null;
+    }
+    if (mixedStreamRef.current) {
+      mixedStreamRef.current.getTracks().forEach(track => track.stop());
+      mixedStreamRef.current = null;
+    }
+
+    // AnalyserNodeとGainNodeをリセット
+    analyserRef.current = null;
+    gainNodeRef.current = null;
 
     setIsRecording(false);
     setIsSpeaking(false);
@@ -593,6 +697,57 @@ export function AudioTranscription() {
               <span>30秒</span>
             </div>
           </div>
+        )}
+      </div>
+
+      {/* 音声ソース設定 */}
+      <div className="p-4 border-b border-[hsl(var(--border))] bg-[hsl(var(--secondary)/0.3)]">
+        <h3 className="text-xs font-medium text-[hsl(var(--muted-foreground))] flex items-center gap-1 mb-3">
+          <MonitorSpeaker className="w-3 h-3" />
+          音声ソース
+        </h3>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setAudioSource('microphone')}
+            disabled={isRecording}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
+              audioSource === 'microphone'
+                ? 'bg-purple-500 text-white'
+                : 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.8)]'
+            } disabled:opacity-50`}
+          >
+            <Mic className="w-3 h-3" />
+            マイク
+          </button>
+          <button
+            onClick={() => setAudioSource('system')}
+            disabled={isRecording}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
+              audioSource === 'system'
+                ? 'bg-purple-500 text-white'
+                : 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.8)]'
+            } disabled:opacity-50`}
+          >
+            <Monitor className="w-3 h-3" />
+            システム音声
+          </button>
+          <button
+            onClick={() => setAudioSource('both')}
+            disabled={isRecording}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
+              audioSource === 'both'
+                ? 'bg-purple-500 text-white'
+                : 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.8)]'
+            } disabled:opacity-50`}
+          >
+            <MonitorSpeaker className="w-3 h-3" />
+            両方
+          </button>
+        </div>
+        {audioSource !== 'microphone' && (
+          <p className="text-xs text-[hsl(var(--muted-foreground))] mt-2">
+            ⚠️ システム音声を使用するには、録音開始時に画面共有を許可してください
+          </p>
         )}
       </div>
 
