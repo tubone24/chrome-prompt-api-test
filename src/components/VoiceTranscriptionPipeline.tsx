@@ -1,7 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Languages, FileText, Download, Volume2 } from 'lucide-react';
+import { Mic, MicOff, Loader2, AlertCircle, CheckCircle2, Trash2, Languages, FileText, Download, Volume2, Monitor, MonitorSpeaker, RefreshCw } from 'lucide-react';
 
 type Status = 'checking' | 'available' | 'unavailable' | 'recording' | 'downloading';
+
+// 音声ソースタイプ
+type AudioSource = 'microphone' | 'system' | 'both';
+
+// 文字起こし結果の状態
+type TranscriptionStatus = 'provisional' | 'confirmed' | 're-evaluating';
 
 interface ProcessedChunk {
   id: string;
@@ -10,12 +16,16 @@ interface ProcessedChunk {
     text: string;
     isProcessing: boolean;
     error?: string;
+    status: TranscriptionStatus; // 仮/確定/再評価中
   };
   translation: {
     text: string;
     isProcessing: boolean;
     error?: string;
   };
+  // 段階的処理用
+  audioBlob?: Blob; // 再評価用の音声データ
+  segmentId?: string; // セグメントグループID（再評価時に統合）
 }
 
 interface OverallSummary {
@@ -83,6 +93,27 @@ export function VoiceTranscriptionPipeline() {
   // GainNode参照
   const gainNodeRef = useRef<GainNode | null>(null);
   const timerRef = useRef<number | null>(null);
+
+  // 音声ソース設定
+  const [audioSource, setAudioSource] = useState<AudioSource>('microphone');
+  const systemStreamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const mixedStreamRef = useRef<MediaStream | null>(null);
+
+  // 段階的文字起こし設定
+  const [enableProgressiveTranscription, setEnableProgressiveTranscription] = useState(true);
+  const [provisionalInterval, setProvisionalInterval] = useState(3); // 仮文字起こし間隔（秒）
+  const [reEvaluationInterval, setReEvaluationInterval] = useState(12); // 再評価間隔（秒）
+
+  // 段階的処理用のバッファ
+  const audioBufferRef = useRef<Blob[]>([]); // 再評価用音声バッファ
+  const currentSegmentIdRef = useRef<string>(crypto.randomUUID());
+  const segmentStartTimeRef = useRef<number>(0);
+  const chunkCountInSegmentRef = useRef<number>(0);
+
+  // 仮処理のキャンセル用
+  const provisionalAbortControllerRef = useRef<AbortController | null>(null);
+  const pendingProvisionalChunksRef = useRef<Set<string>>(new Set()); // 処理中の仮チャンクID
 
   // 固定設定
   const MIN_RECORDING_DURATION = 500; // 最小録音時間（ms）
@@ -410,8 +441,207 @@ export function VoiceTranscriptionPipeline() {
     }
   }, [summarizeTextWithCheckpoint, enableSummarization]);
 
+  // システム音声ストリームを取得
+  const getSystemAudioStream = async (): Promise<MediaStream> => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true, // getDisplayMediaにはvideo: trueが必須
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        }
+      });
+
+      // ビデオトラックは不要なので停止
+      stream.getVideoTracks().forEach(track => track.stop());
+
+      // 音声トラックのみを含む新しいストリームを作成
+      const audioOnlyStream = new MediaStream(stream.getAudioTracks());
+      return audioOnlyStream;
+    } catch (e) {
+      console.error('Failed to get system audio:', e);
+      throw new Error('システム音声の取得に失敗しました。画面共有を許可してください。');
+    }
+  };
+
+  // マイクストリームを取得
+  const getMicrophoneStream = async (): Promise<MediaStream> => {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        sampleRate: 16000,
+      }
+    });
+  };
+
+  // 複数のオーディオストリームを混合
+  const mixAudioStreams = (streams: MediaStream[]): MediaStream => {
+    const audioContext = new AudioContext();
+    const destination = audioContext.createMediaStreamDestination();
+
+    streams.forEach(stream => {
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(destination);
+    });
+
+    audioContextRef.current = audioContext;
+    return destination.stream;
+  };
+
+  // 音声ストリームを設定
+  const setupAudioStream = async (): Promise<MediaStream> => {
+    let finalStream: MediaStream;
+
+    if (audioSource === 'microphone') {
+      finalStream = await getMicrophoneStream();
+      micStreamRef.current = finalStream;
+    } else if (audioSource === 'system') {
+      finalStream = await getSystemAudioStream();
+      systemStreamRef.current = finalStream;
+    } else {
+      // 両方を混合
+      const [micStream, sysStream] = await Promise.all([
+        getMicrophoneStream(),
+        getSystemAudioStream()
+      ]);
+      micStreamRef.current = micStream;
+      systemStreamRef.current = sysStream;
+      finalStream = mixAudioStreams([micStream, sysStream]);
+      mixedStreamRef.current = finalStream;
+    }
+
+    return finalStream;
+  };
+
+  // セグメントの再評価を実行
+  const reEvaluateSegment = async (segmentId: string, combinedAudioBlob: Blob) => {
+    console.log(`Re-evaluating segment ${segmentId}, size: ${combinedAudioBlob.size}`);
+
+    let languageModelSession: LanguageModelSession | null = null;
+    let translatorSession: TranslatorSession | null = null;
+
+    try {
+      // セグメント内のチャンクを再評価中に設定
+      setChunks(prev =>
+        prev.map(c =>
+          c.segmentId === segmentId
+            ? {
+                ...c,
+                transcription: { ...c.transcription, status: 're-evaluating' as TranscriptionStatus }
+              }
+            : c
+        )
+      );
+
+      // 文字起こしセッション作成
+      languageModelSession = await LanguageModel.create({
+        expectedInputs: [{ type: 'audio' }],
+        expectedOutputLanguages: [sourceLanguage],
+        systemPrompt: '音声を文字起こしして、transcriptionフィールドに結果を入れてください。音声が聞き取れない場合は空文字を返してください。前後の文脈を考慮して、自然な日本語になるように文字起こしを行ってください。',
+      });
+
+      const arrayBuffer = await blobToArrayBuffer(combinedAudioBlob);
+
+      const transcriptionSchema = {
+        type: 'object',
+        properties: {
+          transcription: { type: 'string', description: '音声の文字起こし結果' },
+        },
+        required: ['transcription'],
+        additionalProperties: false,
+      };
+
+      const rawResponse = await languageModelSession.prompt(
+        [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', value: 'この音声を文字起こししてください。文脈を考慮して自然な文章にしてください：' },
+              { type: 'audio', value: arrayBuffer },
+            ],
+          },
+        ],
+        { responseConstraint: transcriptionSchema }
+      );
+
+      const transcription = extractTranscription(rawResponse);
+      console.log(`Re-evaluated transcription for segment ${segmentId}:`, transcription);
+
+      // 翻訳
+      translatorSession = await Translator.create({
+        sourceLanguage: sourceLanguage,
+        targetLanguage: targetLanguage,
+      });
+
+      const translatedText = await translatorSession.translate(transcription);
+
+      // セグメント内のチャンクを統合して更新
+      setChunks(prev => {
+        const segmentChunks = prev.filter(c => c.segmentId === segmentId);
+        const otherChunks = prev.filter(c => c.segmentId !== segmentId);
+
+        if (segmentChunks.length === 0) return prev;
+
+        // 最初のチャンクに統合結果を設定、他は削除
+        const firstChunk = segmentChunks[0];
+        const consolidatedChunk: ProcessedChunk = {
+          ...firstChunk,
+          transcription: {
+            text: transcription,
+            isProcessing: false,
+            status: 'confirmed' as TranscriptionStatus,
+          },
+          translation: {
+            text: translatedText,
+            isProcessing: false,
+          },
+        };
+
+        const updated = [...otherChunks, consolidatedChunk].sort(
+          (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
+        );
+
+        // 要約を更新
+        const allTranscriptions = updated
+          .filter(c => c.transcription.text && !c.transcription.error)
+          .map(c => c.transcription.text);
+
+        const allTranslations = updated
+          .filter(c => c.translation.text && !c.translation.error)
+          .map(c => c.translation.text);
+
+        updateOverallSummaries(allTranscriptions, allTranslations, sourceLanguage, targetLanguage);
+
+        return updated;
+      });
+    } catch (e) {
+      console.error('Re-evaluation error:', e);
+      // エラー時は仮結果を確定結果に変更
+      setChunks(prev =>
+        prev.map(c =>
+          c.segmentId === segmentId
+            ? {
+                ...c,
+                transcription: { ...c.transcription, status: 'confirmed' as TranscriptionStatus }
+              }
+            : c
+        )
+      );
+    } finally {
+      if (languageModelSession) languageModelSession.destroy();
+      if (translatorSession) translatorSession.destroy();
+    }
+  };
+
   // 音声チャンクを処理（文字起こし→翻訳）
-  const processChunk = async (audioBlob: Blob) => {
+  const processChunk = async (
+    audioBlob: Blob,
+    isProvisional: boolean = false,
+    segmentId?: string,
+    abortSignal?: AbortSignal
+  ) => {
     if (audioBlob.size < 1000) {
       console.log('Audio chunk too small, skipping:', audioBlob.size);
       return;
@@ -419,11 +649,22 @@ export function VoiceTranscriptionPipeline() {
 
     const chunkId = crypto.randomUUID();
 
+    // 仮処理の場合はpendingに追加
+    if (isProvisional) {
+      pendingProvisionalChunksRef.current.add(chunkId);
+    }
+
     const newChunk: ProcessedChunk = {
       id: chunkId,
       timestamp: new Date(),
-      transcription: { text: '', isProcessing: true },
+      transcription: {
+        text: '',
+        isProcessing: true,
+        status: isProvisional ? 'provisional' : 'confirmed'
+      },
       translation: { text: '', isProcessing: false },
+      audioBlob: isProvisional ? audioBlob : undefined,
+      segmentId: segmentId,
     };
 
     setChunks(prev => [...prev, newChunk]);
@@ -431,7 +672,16 @@ export function VoiceTranscriptionPipeline() {
     let languageModelSession: LanguageModelSession | null = null;
     let translatorSession: TranslatorSession | null = null;
 
+    // キャンセルチェック用のヘルパー
+    const checkAborted = () => {
+      if (abortSignal?.aborted) {
+        throw new Error('ABORTED');
+      }
+    };
+
     try {
+      checkAborted();
+
       // ステップ1: 文字起こし（構造化アウトプット）
       languageModelSession = await LanguageModel.create({
         expectedInputs: [{ type: 'audio' }],
@@ -439,8 +689,12 @@ export function VoiceTranscriptionPipeline() {
         systemPrompt: '音声を文字起こしして、transcriptionフィールドに結果を入れてください。音声が聞き取れない場合は空文字を返してください。',
       });
 
+      checkAborted();
+
       const arrayBuffer = await blobToArrayBuffer(audioBlob);
       console.log('Audio buffer size:', arrayBuffer.byteLength);
+
+      checkAborted();
 
       // 構造化アウトプット用のJSON Schema
       const transcriptionSchema = {
@@ -465,6 +719,8 @@ export function VoiceTranscriptionPipeline() {
         { responseConstraint: transcriptionSchema }
       );
 
+      checkAborted();
+
       // JSONをパースして文字起こしテキストを取得
       const transcription = extractTranscription(rawResponse);
       console.log('Extracted transcription:', transcription);
@@ -474,12 +730,18 @@ export function VoiceTranscriptionPipeline() {
           c.id === chunkId
             ? {
                 ...c,
-                transcription: { text: transcription, isProcessing: false },
+                transcription: {
+                  text: transcription,
+                  isProcessing: false,
+                  status: isProvisional ? 'provisional' : 'confirmed'
+                },
                 translation: { text: '', isProcessing: true },
               }
             : c
         )
       );
+
+      checkAborted();
 
       // ステップ2: 翻訳
       translatorSession = await Translator.create({
@@ -487,7 +749,11 @@ export function VoiceTranscriptionPipeline() {
         targetLanguage: targetLanguage,
       });
 
+      checkAborted();
+
       const translatedText = await translatorSession.translate(transcription);
+
+      checkAborted();
 
       // チャンクを更新
       setChunks(prev => {
@@ -515,8 +781,16 @@ export function VoiceTranscriptionPipeline() {
         return updated;
       });
     } catch (e) {
-      console.error('Processing error:', e);
       const errorMessage = e instanceof Error ? e.message : 'Unknown error';
+
+      // ABORTED エラーの場合は静かに処理中のチャンクを削除
+      if (errorMessage === 'ABORTED') {
+        console.log(`Provisional processing aborted for chunk ${chunkId}`);
+        setChunks(prev => prev.filter(c => c.id !== chunkId));
+        return;
+      }
+
+      console.error('Processing error:', e);
 
       setChunks(prev =>
         prev.map(c =>
@@ -524,7 +798,7 @@ export function VoiceTranscriptionPipeline() {
             ? {
                 ...c,
                 transcription: c.transcription.isProcessing
-                  ? { text: '', isProcessing: false, error: errorMessage }
+                  ? { text: '', isProcessing: false, error: errorMessage, status: 'confirmed' as TranscriptionStatus }
                   : c.transcription,
                 translation: c.translation.isProcessing
                   ? { text: '', isProcessing: false, error: errorMessage }
@@ -534,6 +808,10 @@ export function VoiceTranscriptionPipeline() {
         )
       );
     } finally {
+      // pendingから削除
+      if (isProvisional) {
+        pendingProvisionalChunksRef.current.delete(chunkId);
+      }
       if (languageModelSession) languageModelSession.destroy();
       if (translatorSession) translatorSession.destroy();
     }
@@ -598,6 +876,50 @@ export function VoiceTranscriptionPipeline() {
     analyze();
   };
 
+  // 再評価タイマー
+  const reEvaluationTimerRef = useRef<number | null>(null);
+
+  // 仮処理をキャンセルして再評価を実行
+  const triggerReEvaluation = () => {
+    const segmentId = currentSegmentIdRef.current;
+    const audioChunks = [...audioBufferRef.current];
+
+    if (audioChunks.length === 0) {
+      console.log('No audio chunks for re-evaluation');
+      return;
+    }
+
+    console.log(`Triggering re-evaluation for segment ${segmentId}, ${audioChunks.length} chunks`);
+
+    // 仮処理をキャンセル
+    if (provisionalAbortControllerRef.current) {
+      provisionalAbortControllerRef.current.abort();
+      provisionalAbortControllerRef.current = null;
+    }
+
+    // 処理中の仮チャンクを削除
+    setChunks(prev => prev.filter(c =>
+      c.segmentId !== segmentId || c.transcription.status === 'confirmed'
+    ));
+
+    // 音声を結合
+    const combinedBlob = new Blob(audioChunks, { type: mimeTypeRef.current });
+
+    // バッファをリセット
+    audioBufferRef.current = [];
+    chunkCountInSegmentRef.current = 0;
+
+    // 新しいセグメントIDを生成
+    currentSegmentIdRef.current = crypto.randomUUID();
+    segmentStartTimeRef.current = Date.now();
+
+    // 新しいAbortControllerを作成
+    provisionalAbortControllerRef.current = new AbortController();
+
+    // 再評価を実行（確定結果として）
+    reEvaluateSegment(segmentId, combinedBlob);
+  };
+
   // 新しいMediaRecorderを作成
   const startNewRecorder = () => {
     if (!streamRef.current || !isRecordingRef.current) return;
@@ -616,6 +938,10 @@ export function VoiceTranscriptionPipeline() {
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
         chunksRef.current.push(event.data);
+        // 段階的処理用バッファにも追加
+        if (enableProgressiveTranscription) {
+          audioBufferRef.current.push(event.data);
+        }
       }
     };
 
@@ -628,7 +954,32 @@ export function VoiceTranscriptionPipeline() {
         console.log('Processing audio chunk:', audioBlob.size, 'bytes');
 
         if (audioBlob.size >= 1000) {
-          processChunk(audioBlob);
+          if (enableProgressiveTranscription) {
+            // 段階的処理: 仮文字起こし
+            const segmentId = currentSegmentIdRef.current;
+            chunkCountInSegmentRef.current++;
+
+            // AbortControllerがなければ作成
+            if (!provisionalAbortControllerRef.current) {
+              provisionalAbortControllerRef.current = new AbortController();
+            }
+
+            processChunk(
+              audioBlob,
+              true, // isProvisional
+              segmentId,
+              provisionalAbortControllerRef.current.signal
+            );
+
+            // 再評価タイミングをチェック
+            const elapsedSinceSegmentStart = (Date.now() - segmentStartTimeRef.current) / 1000;
+            if (elapsedSinceSegmentStart >= reEvaluationInterval) {
+              triggerReEvaluation();
+            }
+          } else {
+            // 通常処理
+            processChunk(audioBlob);
+          }
         } else {
           console.log('Audio chunk too small, skipping');
         }
@@ -648,8 +999,9 @@ export function VoiceTranscriptionPipeline() {
       console.log('Started new recorder (voice-activated)');
       startAudioAnalysis();
     } else {
-      // 固定時間モード
-      console.log(`Started new recorder (fixed ${fixedDuration}s)`);
+      // 固定時間モード - 段階的処理の場合は短い間隔で
+      const interval = enableProgressiveTranscription ? provisionalInterval : fixedDuration;
+      console.log(`Started new recorder (fixed ${interval}s, progressive: ${enableProgressiveTranscription})`);
       hasSpokenRef.current = true; // 固定モードでは常にtrueにする
 
       // タイマーでカウントダウンと自動停止
@@ -661,7 +1013,7 @@ export function VoiceTranscriptionPipeline() {
         count++;
         setCurrentChunkTime(count);
 
-        if (count >= fixedDuration) {
+        if (count >= interval) {
           if (timerRef.current) {
             window.clearInterval(timerRef.current);
             timerRef.current = null;
@@ -680,28 +1032,31 @@ export function VoiceTranscriptionPipeline() {
   // 録音開始
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 16000,
-        }
-      });
+      // 音声ソースを設定
+      const stream = await setupAudioStream();
       streamRef.current = stream;
 
-      // AudioContextとAnalyserNode、GainNodeをセットアップ
-      audioContextRef.current = new AudioContext();
-      analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 256;
-      analyserRef.current.smoothingTimeConstant = 0.8;
+      // AudioContextが既にセットアップされている場合（mixAudioStreamsで作成）はスキップ
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+
+      // AnalyserNodeをセットアップ
+      if (!analyserRef.current) {
+        analyserRef.current = audioContextRef.current.createAnalyser();
+        analyserRef.current.fftSize = 256;
+        analyserRef.current.smoothingTimeConstant = 0.8;
+      }
 
       // GainNodeを作成してゲインを適用
-      gainNodeRef.current = audioContextRef.current.createGain();
-      gainNodeRef.current.gain.value = inputGain;
+      if (!gainNodeRef.current) {
+        gainNodeRef.current = audioContextRef.current.createGain();
+        gainNodeRef.current.gain.value = inputGain;
 
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      source.connect(gainNodeRef.current);
-      gainNodeRef.current.connect(analyserRef.current);
+        const source = audioContextRef.current.createMediaStreamSource(stream);
+        source.connect(gainNodeRef.current);
+        gainNodeRef.current.connect(analyserRef.current);
+      }
 
       mimeTypeRef.current = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
@@ -710,6 +1065,17 @@ export function VoiceTranscriptionPipeline() {
           : 'audio/mp4';
 
       console.log('Using MIME type:', mimeTypeRef.current);
+      console.log('Audio source:', audioSource);
+
+      // 段階的処理の初期化
+      if (enableProgressiveTranscription) {
+        audioBufferRef.current = [];
+        currentSegmentIdRef.current = crypto.randomUUID();
+        segmentStartTimeRef.current = Date.now();
+        chunkCountInSegmentRef.current = 0;
+        provisionalAbortControllerRef.current = new AbortController();
+        pendingProvisionalChunksRef.current.clear();
+      }
 
       setIsRecording(true);
       isRecordingRef.current = true;
@@ -718,7 +1084,7 @@ export function VoiceTranscriptionPipeline() {
       startNewRecorder();
     } catch (e) {
       console.error('Recording error:', e);
-      setError(e instanceof Error ? e.message : 'マイクにアクセスできません');
+      setError(e instanceof Error ? e.message : '音声入力にアクセスできません');
     }
   };
 
@@ -732,6 +1098,12 @@ export function VoiceTranscriptionPipeline() {
       timerRef.current = null;
     }
 
+    // 再評価タイマーをクリア
+    if (reEvaluationTimerRef.current) {
+      window.clearInterval(reEvaluationTimerRef.current);
+      reEvaluationTimerRef.current = null;
+    }
+
     // アニメーションフレームをキャンセル
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -742,16 +1114,44 @@ export function VoiceTranscriptionPipeline() {
       mediaRecorderRef.current.stop();
     }
 
+    // 残っているバッファがあれば最終的な再評価を実行
+    if (enableProgressiveTranscription && audioBufferRef.current.length > 0) {
+      triggerReEvaluation();
+    }
+
+    // 仮処理をキャンセル
+    if (provisionalAbortControllerRef.current) {
+      provisionalAbortControllerRef.current.abort();
+      provisionalAbortControllerRef.current = null;
+    }
+
     // AudioContextをクローズ
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
 
+    // 全てのストリームを停止
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(track => track.stop());
+      micStreamRef.current = null;
+    }
+    if (systemStreamRef.current) {
+      systemStreamRef.current.getTracks().forEach(track => track.stop());
+      systemStreamRef.current = null;
+    }
+    if (mixedStreamRef.current) {
+      mixedStreamRef.current.getTracks().forEach(track => track.stop());
+      mixedStreamRef.current = null;
+    }
+
+    // AnalyserNodeとGainNodeをリセット
+    analyserRef.current = null;
+    gainNodeRef.current = null;
 
     setIsRecording(false);
     setIsSpeaking(false);
@@ -817,7 +1217,9 @@ export function VoiceTranscriptionPipeline() {
               {status === 'recording' && (
                 recordingMode === 'vad'
                   ? (isSpeaking ? '🎤 発話検出中...' : '🔇 待機中...')
-                  : `⏱️ 録音中 (${currentChunkTime}s / ${fixedDuration}s)`
+                  : enableProgressiveTranscription
+                    ? `⏱️ 録音中 (${currentChunkTime}s / ${provisionalInterval}s) [段階的処理]`
+                    : `⏱️ 録音中 (${currentChunkTime}s / ${fixedDuration}s)`
               )}
               {status === 'unavailable' && (error || 'API利用不可')}
             </span>
@@ -932,7 +1334,128 @@ export function VoiceTranscriptionPipeline() {
           </div>
         </div>
 
-        {/* 音声設定 */}
+        {/* 音声ソース設定 */}
+        <div className="mt-4 pt-4 border-t border-[hsl(var(--border))]">
+          <h3 className="text-xs font-medium text-[hsl(var(--muted-foreground))] flex items-center gap-1 mb-3">
+            <MonitorSpeaker className="w-3 h-3" />
+            音声ソース
+          </h3>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setAudioSource('microphone')}
+              disabled={isRecording}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
+                audioSource === 'microphone'
+                  ? 'bg-purple-500 text-white'
+                  : 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.8)]'
+              } disabled:opacity-50`}
+            >
+              <Mic className="w-3 h-3" />
+              マイク
+            </button>
+            <button
+              onClick={() => setAudioSource('system')}
+              disabled={isRecording}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
+                audioSource === 'system'
+                  ? 'bg-purple-500 text-white'
+                  : 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.8)]'
+              } disabled:opacity-50`}
+            >
+              <Monitor className="w-3 h-3" />
+              システム音声
+            </button>
+            <button
+              onClick={() => setAudioSource('both')}
+              disabled={isRecording}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
+                audioSource === 'both'
+                  ? 'bg-purple-500 text-white'
+                  : 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))] hover:bg-[hsl(var(--secondary)/0.8)]'
+              } disabled:opacity-50`}
+            >
+              <MonitorSpeaker className="w-3 h-3" />
+              両方
+            </button>
+          </div>
+          {audioSource !== 'microphone' && (
+            <p className="text-xs text-[hsl(var(--muted-foreground))] mt-2">
+              ⚠️ システム音声を使用するには、録音開始時に画面共有を許可してください
+            </p>
+          )}
+        </div>
+
+        {/* 段階的処理設定 */}
+        <div className="mt-4 pt-4 border-t border-[hsl(var(--border))]">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-medium text-[hsl(var(--muted-foreground))] flex items-center gap-1">
+              <RefreshCw className="w-3 h-3" />
+              段階的処理（リアルタイム精度向上）
+            </h3>
+            <button
+              onClick={() => setEnableProgressiveTranscription(!enableProgressiveTranscription)}
+              disabled={isRecording}
+              className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                enableProgressiveTranscription
+                  ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                  : 'bg-gray-500/20 text-gray-400 hover:bg-gray-500/30'
+              } disabled:opacity-50`}
+            >
+              {enableProgressiveTranscription ? 'ON' : 'OFF'}
+            </button>
+          </div>
+          {enableProgressiveTranscription && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs text-[hsl(var(--muted-foreground))]">仮文字起こし間隔</label>
+                  <span className="text-xs font-mono text-[hsl(var(--foreground))]">{provisionalInterval}秒</span>
+                </div>
+                <input
+                  type="range"
+                  min="2"
+                  max="10"
+                  step="1"
+                  value={provisionalInterval}
+                  onChange={(e) => setProvisionalInterval(parseInt(e.target.value))}
+                  disabled={isRecording}
+                  className="w-full h-2 bg-[hsl(var(--secondary))] rounded-lg appearance-none cursor-pointer accent-purple-500 disabled:opacity-50"
+                />
+                <div className="flex justify-between text-[10px] text-[hsl(var(--muted-foreground))]">
+                  <span>2秒</span>
+                  <span>10秒</span>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs text-[hsl(var(--muted-foreground))]">再評価間隔</label>
+                  <span className="text-xs font-mono text-[hsl(var(--foreground))]">{reEvaluationInterval}秒</span>
+                </div>
+                <input
+                  type="range"
+                  min="6"
+                  max="30"
+                  step="3"
+                  value={reEvaluationInterval}
+                  onChange={(e) => setReEvaluationInterval(parseInt(e.target.value))}
+                  disabled={isRecording}
+                  className="w-full h-2 bg-[hsl(var(--secondary))] rounded-lg appearance-none cursor-pointer accent-purple-500 disabled:opacity-50"
+                />
+                <div className="flex justify-between text-[10px] text-[hsl(var(--muted-foreground))]">
+                  <span>6秒</span>
+                  <span>30秒</span>
+                </div>
+              </div>
+            </div>
+          )}
+          {enableProgressiveTranscription && (
+            <p className="text-xs text-[hsl(var(--muted-foreground))] mt-2">
+              💡 {provisionalInterval}秒ごとに仮文字起こし → {reEvaluationInterval}秒ごとに精度向上のため再評価
+            </p>
+          )}
+        </div>
+
+        {/* 録音設定 */}
         <div className="mt-4 pt-4 border-t border-[hsl(var(--border))]">
           <h3 className="text-xs font-medium text-[hsl(var(--muted-foreground))] flex items-center gap-1 mb-3">
             <Volume2 className="w-3 h-3" />
@@ -1083,11 +1606,11 @@ export function VoiceTranscriptionPipeline() {
                 <div className="flex-1 bg-[hsl(var(--secondary))] rounded-full h-3 overflow-hidden">
                   <div
                     className="h-3 rounded-full transition-all duration-1000 bg-gradient-to-r from-purple-500 to-pink-500"
-                    style={{ width: `${(currentChunkTime / fixedDuration) * 100}%` }}
+                    style={{ width: `${(currentChunkTime / (enableProgressiveTranscription ? provisionalInterval : fixedDuration)) * 100}%` }}
                   />
                 </div>
                 <span className="text-xs font-mono text-[hsl(var(--foreground))] w-16 text-right">
-                  {currentChunkTime}s / {fixedDuration}s
+                  {currentChunkTime}s / {enableProgressiveTranscription ? provisionalInterval : fixedDuration}s
                 </span>
               </div>
             )}
@@ -1112,7 +1635,9 @@ export function VoiceTranscriptionPipeline() {
             <p className="text-xs text-center text-[hsl(var(--muted-foreground))]">
               {recordingMode === 'vad'
                 ? '発話終了後、自動で文字起こしを開始します'
-                : `${fixedDuration}秒ごとに自動で文字起こしを開始します`}
+                : enableProgressiveTranscription
+                  ? `${provisionalInterval}秒ごとに仮文字起こし → ${reEvaluationInterval}秒ごとに再評価`
+                  : `${fixedDuration}秒ごとに自動で文字起こしを開始します`}
             </p>
           </div>
         )}
@@ -1175,54 +1700,98 @@ export function VoiceTranscriptionPipeline() {
             </div>
           ) : (
             <div className="space-y-4">
-              {chunks.map((chunk) => (
-                <div
-                  key={chunk.id}
-                  className="p-4 rounded-lg bg-[hsl(var(--card))] border border-[hsl(var(--border))]"
-                >
-                  <div className="text-xs text-[hsl(var(--muted-foreground))] mb-3">
-                    {chunk.timestamp.toLocaleTimeString('ja-JP')}
-                  </div>
+              {chunks.map((chunk) => {
+                const isProvisional = chunk.transcription.status === 'provisional';
+                const isReEvaluating = chunk.transcription.status === 're-evaluating';
 
-                  {/* 文字起こし */}
-                  <div className="mb-3">
-                    <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--muted-foreground))] mb-1">
-                      <Mic className="w-3 h-3" />
-                      文字起こし
-                    </div>
-                    {chunk.transcription.isProcessing ? (
-                      <div className="flex items-center gap-2 text-[hsl(var(--muted-foreground))]">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span className="text-sm">処理中...</span>
+                return (
+                  <div
+                    key={chunk.id}
+                    className={`p-4 rounded-lg border transition-all ${
+                      isReEvaluating
+                        ? 'bg-blue-500/10 border-blue-500/30 animate-pulse'
+                        : isProvisional
+                          ? 'bg-yellow-500/5 border-yellow-500/20 opacity-80'
+                          : 'bg-[hsl(var(--card))] border-[hsl(var(--border))]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="text-xs text-[hsl(var(--muted-foreground))]">
+                        {chunk.timestamp.toLocaleTimeString('ja-JP')}
                       </div>
-                    ) : chunk.transcription.error ? (
-                      <p className="text-sm text-red-400">エラー: {chunk.transcription.error}</p>
-                    ) : chunk.transcription.text ? (
-                      <p className="text-sm text-[hsl(var(--foreground))]">{chunk.transcription.text}</p>
-                    ) : (
-                      <p className="text-sm text-[hsl(var(--muted-foreground))] italic">（音声なし）</p>
-                    )}
-                  </div>
+                      {/* ステータスバッジ */}
+                      {enableProgressiveTranscription && (
+                        <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] ${
+                          isReEvaluating
+                            ? 'bg-blue-500/20 text-blue-400'
+                            : isProvisional
+                              ? 'bg-yellow-500/20 text-yellow-400'
+                              : 'bg-green-500/20 text-green-400'
+                        }`}>
+                          {isReEvaluating ? (
+                            <>
+                              <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                              再評価中
+                            </>
+                          ) : isProvisional ? (
+                            <>
+                              <Loader2 className="w-2.5 h-2.5" />
+                              仮
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="w-2.5 h-2.5" />
+                              確定
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
 
-                  {/* 翻訳 */}
-                  <div>
-                    <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--muted-foreground))] mb-1">
-                      <Languages className="w-3 h-3" />
-                      翻訳
-                    </div>
-                    {chunk.translation.isProcessing ? (
-                      <div className="flex items-center gap-2 text-[hsl(var(--muted-foreground))]">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span className="text-sm">処理中...</span>
+                    {/* 文字起こし */}
+                    <div className="mb-3">
+                      <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--muted-foreground))] mb-1">
+                        <Mic className="w-3 h-3" />
+                        文字起こし
                       </div>
-                    ) : chunk.translation.error ? (
-                      <p className="text-sm text-red-400">エラー: {chunk.translation.error}</p>
-                    ) : chunk.translation.text ? (
-                      <p className="text-sm text-[hsl(var(--foreground))]">{chunk.translation.text}</p>
-                    ) : null}
+                      {chunk.transcription.isProcessing ? (
+                        <div className="flex items-center gap-2 text-[hsl(var(--muted-foreground))]">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span className="text-sm">処理中...</span>
+                        </div>
+                      ) : chunk.transcription.error ? (
+                        <p className="text-sm text-red-400">エラー: {chunk.transcription.error}</p>
+                      ) : chunk.transcription.text ? (
+                        <p className={`text-sm ${isProvisional ? 'text-[hsl(var(--muted-foreground))] italic' : 'text-[hsl(var(--foreground))]'}`}>
+                          {chunk.transcription.text}
+                        </p>
+                      ) : (
+                        <p className="text-sm text-[hsl(var(--muted-foreground))] italic">（音声なし）</p>
+                      )}
+                    </div>
+
+                    {/* 翻訳 */}
+                    <div>
+                      <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--muted-foreground))] mb-1">
+                        <Languages className="w-3 h-3" />
+                        翻訳
+                      </div>
+                      {chunk.translation.isProcessing ? (
+                        <div className="flex items-center gap-2 text-[hsl(var(--muted-foreground))]">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span className="text-sm">処理中...</span>
+                        </div>
+                      ) : chunk.translation.error ? (
+                        <p className="text-sm text-red-400">エラー: {chunk.translation.error}</p>
+                      ) : chunk.translation.text ? (
+                        <p className={`text-sm ${isProvisional ? 'text-[hsl(var(--muted-foreground))] italic' : 'text-[hsl(var(--foreground))]'}`}>
+                          {chunk.translation.text}
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               <div ref={chunksEndRef} />
             </div>
           )}
