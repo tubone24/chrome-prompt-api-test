@@ -178,7 +178,7 @@ export const CalligraphyChecker = () => {
     ctx.clearRect(0, 0, overlay.width, overlay.height);
   }, []);
 
-  // 赤丸マーカーを描画
+  // 赤丸マーカーを描画（筆で一筆書きしたような朱色の丸）
   const drawMarkers = useCallback((details: FeedbackDetail[], animateIndex: number) => {
     const overlay = overlayCanvasRef.current;
     if (!overlay) return;
@@ -190,27 +190,54 @@ export const CalligraphyChecker = () => {
     details.forEach((detail, index) => {
       if (index > animateIndex) return;
 
-      const radius = 30;
+      const radius = 35;
+      const startAngle = Math.random() * Math.PI * 0.5 - Math.PI * 0.25; // 開始角度をランダムに
+      const arcLength = Math.PI * 1.7 + Math.random() * 0.4; // 少し開いた円（完全に閉じない）
 
-      // 赤丸（筆風）
       ctx.save();
-      ctx.strokeStyle = 'rgba(200, 30, 30, 0.8)';
-      ctx.lineWidth = 5;
 
-      // 筆風の不規則な線
-      for (let i = 0; i < 4; i++) {
-        ctx.beginPath();
-        const offsetRadius = radius + (Math.random() - 0.5) * 6;
-        ctx.arc(
-          detail.x + (Math.random() - 0.5) * 3,
-          detail.y + (Math.random() - 0.5) * 3,
-          offsetRadius,
-          0,
-          Math.PI * 2
-        );
-        ctx.globalAlpha = 0.2 + Math.random() * 0.4;
-        ctx.stroke();
+      // 朱色（オレンジがかった赤）
+      const r = 220 + Math.floor(Math.random() * 20);
+      const g = 80 + Math.floor(Math.random() * 30);
+      const b = 20 + Math.floor(Math.random() * 20);
+
+      // 筆で一筆書きした円を描画
+      const steps = 60;
+      for (let i = 0; i < steps; i++) {
+        const t = i / steps;
+        const angle = startAngle + arcLength * t;
+
+        // 筆圧の変化（始点と終点で細く、中間で太く）
+        const pressureCurve = Math.sin(t * Math.PI);
+        const baseWidth = 6 + pressureCurve * 8;
+
+        // カスレ効果（終点に近づくほどカスレる）
+        const kasure = t > 0.7 ? (t - 0.7) / 0.3 : 0;
+
+        const x = detail.x + Math.cos(angle) * radius;
+        const y = detail.y + Math.sin(angle) * radius;
+
+        // 複数の毛で描画
+        const bristleCount = 8;
+        for (let j = 0; j < bristleCount; j++) {
+          // カスレで一部の毛をスキップ
+          if (Math.random() < kasure * 0.7) continue;
+
+          const perpAngle = angle + Math.PI / 2;
+          const offset = (j / bristleCount - 0.5) * baseWidth;
+          const bx = x + Math.cos(perpAngle) * offset + (Math.random() - 0.5) * 2;
+          const by = y + Math.sin(perpAngle) * offset + (Math.random() - 0.5) * 2;
+
+          const alpha = (0.6 + Math.random() * 0.3) * (1 - kasure * 0.5);
+          const size = (baseWidth / bristleCount) * (0.8 + Math.random() * 0.4);
+
+          ctx.beginPath();
+          ctx.arc(bx, by, size, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+          ctx.fill();
+        }
       }
+
       ctx.restore();
     });
   }, []);
@@ -425,8 +452,7 @@ export const CalligraphyChecker = () => {
     setLastTime(Date.now());
     setLastAngle(0);
 
-    // 採点結果をクリア
-    setGradingResult(null);
+    // 赤丸マーカーのみクリア（採点結果は残す）
     setShowMarkers(false);
     setMarkerAnimationIndex(0);
     clearOverlay();
@@ -546,22 +572,50 @@ export const CalligraphyChecker = () => {
     if (messages.length === 0) return;
 
     const lastMessage = messages[messages.length - 1];
-    if (lastMessage.role !== 'assistant' || lastMessage.isStreaming) return;
+    if (lastMessage.role !== 'assistant') return;
+    if (lastMessage.isStreaming) return;
+
+    console.log('Parsing AI response:', lastMessage.content);
 
     try {
       // JSONを抽出
       const content = lastMessage.content;
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
+        console.log('JSON found:', jsonMatch[0]);
         const parsed = JSON.parse(jsonMatch[0]) as GradingResult;
-        if (parsed.score !== undefined && parsed.overallComment && parsed.details) {
-          setGradingResult(parsed);
-          setShowMarkers(true);
-          setMarkerAnimationIndex(0);
+        console.log('Parsed result:', parsed);
+
+        // detailsが配列でない場合は空配列にする
+        if (!Array.isArray(parsed.details)) {
+          parsed.details = [];
         }
+
+        if (parsed.score !== undefined && parsed.overallComment) {
+          console.log('Setting grading result');
+          setGradingResult(parsed);
+          if (parsed.details.length > 0) {
+            setShowMarkers(true);
+            setMarkerAnimationIndex(0);
+          }
+        }
+      } else {
+        console.log('No JSON found in response');
+        // JSONが見つからない場合、テキストをそのままコメントとして表示
+        setGradingResult({
+          score: 0,
+          overallComment: lastMessage.content || '採点結果を取得できませんでした。',
+          details: []
+        });
       }
     } catch (error) {
       console.error('Failed to parse grading result:', error);
+      // パース失敗時はエラーメッセージを表示
+      setGradingResult({
+        score: 0,
+        overallComment: `採点結果のパースに失敗しました: ${lastMessage.content}`,
+        details: []
+      });
     }
   }, [messages]);
 
