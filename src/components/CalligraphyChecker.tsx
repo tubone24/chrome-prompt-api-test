@@ -623,48 +623,100 @@ export const CalligraphyChecker = () => {
       });
     } else {
       // 払い/はね - 筆を持ち上げながら抜く
-      const haraiLength = isHane ? Math.min(60, velocity * 0.5) : Math.min(45, velocity * 0.4);
-      const steps = Math.max(12, Math.floor(haraiLength));
+      // 払いは長く優雅に、はねは短く跳ねる
+      const haraiLength = isHane ? Math.min(80, velocity * 0.6) : Math.min(120, velocity * 0.8);
+      const steps = Math.max(20, Math.floor(haraiLength * 1.5));
 
-      // はねは上方向に曲がる
-      const curveAmount = isHane ? 0.3 : 0;
+      // はねは上方向に曲がる、払いはわずかに曲がる
+      const curveAmount = isHane ? 0.35 : 0.05;
+
+      // 払いの初期幅（太めに）
+      const initialWidth = 28 * (0.6 + pressure * 0.4);
 
       for (let i = 0; i < steps; i++) {
         const t = i / steps;
 
-        // 先細りの曲線（3次曲線的に）
-        const widthDecay = Math.pow(1 - t, 2);
-        const currentWidth = 22 * widthDecay;
+        // より自然な先細り（指数関数的減衰 + 最後は急激に細く）
+        // 最初の70%は緩やかに、残り30%で急激に細くなる
+        let widthDecay: number;
+        if (t < 0.7) {
+          // 緩やかな減衰
+          widthDecay = 1 - Math.pow(t / 0.7, 1.5) * 0.6;
+        } else {
+          // 急激な減衰（払いの先端）
+          const t2 = (t - 0.7) / 0.3;
+          widthDecay = 0.4 * Math.pow(1 - t2, 2);
+        }
 
-        // 進行方向（はねは曲がる）
-        const currentAngle = angle - curveAmount * t * Math.PI;
+        const currentWidth = initialWidth * widthDecay;
 
-        const px = x + Math.cos(currentAngle) * i * 2;
-        const py = y + Math.sin(currentAngle) * i * 2;
+        // 進行方向（わずかな揺れを加える）
+        const wobble = Math.sin(t * Math.PI * 3) * 0.02 * (1 - t);
+        const currentAngle = angle - curveAmount * t * Math.PI + wobble;
 
-        // カスレ強度（先に行くほど強く）
-        const kasure = t * 0.8 + (1 - strokeInk) * 0.2;
+        // 払いの軌跡（加速しながら進む）
+        const progressSpeed = 1.5 + t * 0.5; // 先に行くほど速く
+        const px = x + Math.cos(currentAngle) * i * progressSpeed;
+        const py = y + Math.sin(currentAngle) * i * progressSpeed;
+
+        // カスレ強度（先に行くほど強く、でも最初は少なめ）
+        let kasure: number;
+        if (t < 0.3) {
+          kasure = t * 0.3 + (1 - strokeInk) * 0.1;
+        } else {
+          kasure = 0.1 + (t - 0.3) * 1.0 + (1 - strokeInk) * 0.2;
+        }
 
         // 個別の毛の軌跡を描画
         bristles.forEach((bristle) => {
-          // 先端の毛だけが最後まで残る
-          if (bristle.distanceFromTip > widthDecay * 0.8) return;
-          if (Math.random() < kasure) return;
+          // 先端の毛だけが最後まで残る（より繊細に）
+          const bristleThreshold = widthDecay * 0.6 + 0.2;
+          if (bristle.distanceFromTip > bristleThreshold) return;
+
+          // カスレ判定（中心の毛はカスレにくい）
+          const centerBonus = 1 - Math.abs(bristle.lateralOffset) * 0.5;
+          if (Math.random() < kasure * (1 - centerBonus * 0.3)) return;
 
           const perpAngle = currentAngle + Math.PI / 2;
-          const lateralPos = bristle.lateralOffset * currentWidth * widthDecay;
 
-          const bx = px + Math.cos(perpAngle) * lateralPos + (Math.random() - 0.5) * 2;
-          const by = py + Math.sin(perpAngle) * lateralPos + (Math.random() - 0.5) * 2;
+          // 毛の広がり（払いの先端で毛が分かれる表現）
+          const spreadFactor = 1 + t * 0.3; // 先に行くほど少し広がる
+          const lateralPos = bristle.lateralOffset * currentWidth * spreadFactor;
 
-          const size = bristle.thickness * (1.5 + widthDecay) * 1.2;
-          const alpha = strokeInk * widthDecay * 0.6;
+          // 毛先の揺れ（先端ほど大きく）
+          const jitter = (Math.random() - 0.5) * (2 + t * 4);
+          const bx = px + Math.cos(perpAngle) * lateralPos + jitter;
+          const by = py + Math.sin(perpAngle) * lateralPos + jitter;
+
+          // 毛の太さ（先端ほど細く）
+          const size = bristle.thickness * (2 + widthDecay * 1.5) * (1 - t * 0.3);
+
+          // 濃さ（先端ほど薄く、でも急激には薄くならない）
+          const alphaDecay = Math.pow(widthDecay, 0.7);
+          const alpha = strokeInk * alphaDecay * 0.7 * centerBonus;
 
           ctx.beginPath();
-          ctx.arc(bx, by, size, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(15, 15, 25, ${alpha})`;
+          ctx.arc(bx, by, Math.max(0.5, size), 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(15, 15, 25, ${Math.max(0.05, alpha)})`;
           ctx.fill();
         });
+
+        // 払いの先端で細い線を追加（毛先が分かれる表現）
+        if (t > 0.6 && Math.random() > 0.7) {
+          const numHairs = Math.floor(3 + Math.random() * 3);
+          for (let h = 0; h < numHairs; h++) {
+            const hairAngle = currentAngle + (Math.random() - 0.5) * 0.3;
+            const hairLength = (1 - t) * 15 * Math.random();
+            const hx = px + Math.cos(hairAngle) * hairLength;
+            const hy = py + Math.sin(hairAngle) * hairLength;
+            const hairAlpha = 0.1 + Math.random() * 0.15;
+
+            ctx.beginPath();
+            ctx.arc(hx, hy, 0.5 + Math.random() * 1, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(15, 15, 25, ${hairAlpha})`;
+            ctx.fill();
+          }
+        }
       }
     }
   }, []);
