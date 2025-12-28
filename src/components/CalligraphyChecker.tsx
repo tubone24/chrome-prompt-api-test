@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Pen, Eraser, Trash2, ChevronDown, Send, RefreshCw } from 'lucide-react';
+import { Pen, Trash2, ChevronDown, Send, RefreshCw } from 'lucide-react';
 import { usePromptAPI } from '../hooks/usePromptAPI';
 
 // 採点結果のJSON構造
@@ -29,7 +29,12 @@ const SAMPLE_CHARACTERS = [
   { char: '心', reading: 'こころ', description: '点と曲線' },
 ];
 
-type Tool = 'brush' | 'eraser';
+// 毛筆の毛（bristle）を表現するクラス
+interface Bristle {
+  offset: number;      // 中心からのオフセット（-1〜1）
+  thickness: number;   // 毛の太さ係数
+  inkAmount: number;   // インク量（カスレに影響）
+}
 
 export const CalligraphyChecker = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -38,16 +43,33 @@ export const CalligraphyChecker = () => {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const [isDrawing, setIsDrawing] = useState(false);
-  const [tool, setTool] = useState<Tool>('brush');
   const [lastPos, setLastPos] = useState<{ x: number; y: number } | null>(null);
   const [lastPressure, setLastPressure] = useState(0.5);
   const [lastTime, setLastTime] = useState(0);
+  const [lastAngle, setLastAngle] = useState(0);
   const [showScrollIndicator, setShowScrollIndicator] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [selectedChar, setSelectedChar] = useState(SAMPLE_CHARACTERS[0]);
   const [gradingResult, setGradingResult] = useState<GradingResult | null>(null);
   const [showMarkers, setShowMarkers] = useState(false);
   const [markerAnimationIndex, setMarkerAnimationIndex] = useState(0);
+
+  // 毛筆の毛を初期化（複数の毛で構成）
+  const bristlesRef = useRef<Bristle[]>([]);
+
+  // 毛を初期化
+  useEffect(() => {
+    const bristles: Bristle[] = [];
+    const bristleCount = 40; // 毛の本数
+    for (let i = 0; i < bristleCount; i++) {
+      bristles.push({
+        offset: (Math.random() - 0.5) * 2,
+        thickness: 0.5 + Math.random() * 0.5,
+        inkAmount: 0.7 + Math.random() * 0.3,
+      });
+    }
+    bristlesRef.current = bristles;
+  }, []);
 
   const {
     messages,
@@ -168,29 +190,25 @@ export const CalligraphyChecker = () => {
     details.forEach((detail, index) => {
       if (index > animateIndex) return;
 
-      const progress = index === animateIndex ? 1 : 1;
-      const radius = 25 * progress;
+      const radius = 30;
 
       // 赤丸（筆風）
       ctx.save();
-      ctx.beginPath();
-      ctx.arc(detail.x, detail.y, radius, 0, Math.PI * 2);
       ctx.strokeStyle = 'rgba(200, 30, 30, 0.8)';
-      ctx.lineWidth = 4;
+      ctx.lineWidth = 5;
 
       // 筆風の不規則な線
-      ctx.setLineDash([]);
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 4; i++) {
         ctx.beginPath();
-        const offsetRadius = radius + (Math.random() - 0.5) * 4;
+        const offsetRadius = radius + (Math.random() - 0.5) * 6;
         ctx.arc(
-          detail.x + (Math.random() - 0.5) * 2,
-          detail.y + (Math.random() - 0.5) * 2,
+          detail.x + (Math.random() - 0.5) * 3,
+          detail.y + (Math.random() - 0.5) * 3,
           offsetRadius,
           0,
           Math.PI * 2
         );
-        ctx.globalAlpha = 0.3 + Math.random() * 0.4;
+        ctx.globalAlpha = 0.2 + Math.random() * 0.4;
         ctx.stroke();
       }
       ctx.restore();
@@ -256,7 +274,7 @@ export const CalligraphyChecker = () => {
     };
   }, []);
 
-  // 筆のストロークを描画（カスレ、止め・はね・払い表現）
+  // 毛筆のストロークを描画（カスレ、止め・はね・払い表現）
   const drawBrushStroke = useCallback((
     ctx: CanvasRenderingContext2D,
     fromX: number,
@@ -265,10 +283,17 @@ export const CalligraphyChecker = () => {
     toY: number,
     fromPressure: number,
     toPressure: number,
-    velocity: number
+    velocity: number,
+    angle: number
   ) => {
     const distance = Math.sqrt((toX - fromX) ** 2 + (toY - fromY) ** 2);
-    const steps = Math.max(1, Math.floor(distance / 2));
+    if (distance < 0.5) return;
+
+    const steps = Math.max(1, Math.floor(distance));
+    const bristles = bristlesRef.current;
+
+    // 基本の筆の太さ（大きめに）
+    const baseWidth = 35;
 
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
@@ -276,35 +301,112 @@ export const CalligraphyChecker = () => {
       const y = fromY + (toY - fromY) * t;
       const pressure = fromPressure + (toPressure - fromPressure) * t;
 
-      // 筆圧と速度に基づく線の太さ
-      const baseWidth = 15;
-      const pressureWidth = baseWidth * (0.3 + pressure * 0.7);
-      const velocityFactor = Math.max(0.5, 1 - velocity * 0.001);
-      const width = pressureWidth * velocityFactor;
+      // 筆圧に応じた太さ（強く押すと太く）
+      const pressureWidth = baseWidth * (0.4 + pressure * 0.8);
 
-      // カスレ効果（速度が速いほどカスレる）
-      const kasureIntensity = Math.min(1, velocity * 0.003);
-      const numStrokes = 5 + Math.floor(kasureIntensity * 3);
+      // 速度に応じたカスレ効果（速いほどカスレる）
+      const kasureIntensity = Math.min(1, velocity * 0.004);
 
-      for (let j = 0; j < numStrokes; j++) {
-        const offsetX = (Math.random() - 0.5) * width * 0.6;
-        const offsetY = (Math.random() - 0.5) * width * 0.6;
-        const strokeWidth = width * (0.2 + Math.random() * 0.3);
+      // 各毛を描画
+      bristles.forEach((bristle) => {
+        // カスレ：速度が速いとインクが途切れる
+        if (Math.random() < kasureIntensity * 0.6) return;
 
-        // カスレによる透明度変化
-        const alpha = 0.6 + Math.random() * 0.3 - kasureIntensity * 0.3;
+        // 毛の位置を計算（角度を考慮）
+        const perpAngle = angle + Math.PI / 2;
+        const offsetX = Math.cos(perpAngle) * bristle.offset * pressureWidth * 0.5;
+        const offsetY = Math.sin(perpAngle) * bristle.offset * pressureWidth * 0.5;
+
+        // 毛の太さ
+        const bristleWidth = pressureWidth * bristle.thickness * 0.15;
+
+        // インク量に応じた透明度
+        const alpha = bristle.inkAmount * (0.7 - kasureIntensity * 0.4) * (0.8 + Math.random() * 0.2);
 
         ctx.beginPath();
-        ctx.arc(x + offsetX, y + offsetY, strokeWidth / 2, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(20, 20, 30, ${Math.max(0.1, alpha)})`;
+        ctx.arc(
+          x + offsetX + (Math.random() - 0.5) * 2,
+          y + offsetY + (Math.random() - 0.5) * 2,
+          bristleWidth,
+          0,
+          Math.PI * 2
+        );
+        ctx.fillStyle = `rgba(15, 15, 25, ${Math.max(0.05, alpha)})`;
         ctx.fill();
-      }
+      });
 
       // 墨のにじみ効果（筆圧が強いところ）
-      if (pressure > 0.6 && Math.random() > 0.8) {
+      if (pressure > 0.7 && Math.random() > 0.85) {
         ctx.beginPath();
-        ctx.arc(x, y, width * 0.8, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(20, 20, 30, 0.05)';
+        ctx.arc(x, y, pressureWidth * 0.6, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(15, 15, 25, 0.03)';
+        ctx.fill();
+      }
+    }
+  }, []);
+
+  // 始点の「入り」を描画
+  const drawEntryPoint = useCallback((
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    pressure: number
+  ) => {
+    const baseSize = 20 * (0.5 + pressure * 0.5);
+    const bristles = bristlesRef.current;
+
+    // 始点の墨だまり
+    bristles.forEach((bristle) => {
+      const offsetX = bristle.offset * baseSize * 0.3;
+      const offsetY = bristle.offset * baseSize * 0.3;
+      const size = baseSize * bristle.thickness * 0.3;
+
+      ctx.beginPath();
+      ctx.arc(
+        x + offsetX + (Math.random() - 0.5) * baseSize * 0.2,
+        y + offsetY + (Math.random() - 0.5) * baseSize * 0.2,
+        size,
+        0,
+        Math.PI * 2
+      );
+      ctx.fillStyle = `rgba(15, 15, 25, ${0.4 + Math.random() * 0.3})`;
+      ctx.fill();
+    });
+  }, []);
+
+  // 終点の「払い」「はね」を描画
+  const drawExitPoint = useCallback((
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    velocity: number,
+    angle: number
+  ) => {
+    // 払いの長さ（速度に応じて）
+    const haraiLength = Math.min(40, velocity * 0.5);
+    const steps = Math.floor(haraiLength);
+
+    for (let i = 0; i < steps; i++) {
+      const t = i / steps;
+      const size = 8 * (1 - t * t); // 先細り（2次曲線的に）
+      const alpha = 0.5 * (1 - t);
+
+      const px = x + Math.cos(angle) * i * 1.5;
+      const py = y + Math.sin(angle) * i * 1.5;
+
+      // カスレながら払う
+      for (let j = 0; j < 3; j++) {
+        if (Math.random() < t * 0.5) continue; // 先に行くほどカスレる
+
+        ctx.beginPath();
+        ctx.arc(
+          px + (Math.random() - 0.5) * size,
+          py + (Math.random() - 0.5) * size,
+          size * (0.2 + Math.random() * 0.3),
+          0,
+          Math.PI * 2
+        );
+        ctx.fillStyle = `rgba(15, 15, 25, ${alpha * (0.5 + Math.random() * 0.5)})`;
         ctx.fill();
       }
     }
@@ -312,6 +414,8 @@ export const CalligraphyChecker = () => {
 
   const startDrawing = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+
     const pos = getCanvasCoordinates(e);
     if (!pos) return;
 
@@ -319,6 +423,7 @@ export const CalligraphyChecker = () => {
     setLastPos({ x: pos.x, y: pos.y });
     setLastPressure(pos.pressure);
     setLastTime(Date.now());
+    setLastAngle(0);
 
     // 採点結果をクリア
     setGradingResult(null);
@@ -326,27 +431,13 @@ export const CalligraphyChecker = () => {
     setMarkerAnimationIndex(0);
     clearOverlay();
 
-    // 始点に点を打つ（止めの表現）
+    // 始点に「入り」を描画
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx) return;
 
-    if (tool === 'brush') {
-      const dotSize = 8 * pos.pressure;
-      for (let i = 0; i < 5; i++) {
-        ctx.beginPath();
-        ctx.arc(
-          pos.x + (Math.random() - 0.5) * dotSize * 0.5,
-          pos.y + (Math.random() - 0.5) * dotSize * 0.5,
-          dotSize * (0.3 + Math.random() * 0.4),
-          0,
-          Math.PI * 2
-        );
-        ctx.fillStyle = `rgba(20, 20, 30, ${0.5 + Math.random() * 0.3})`;
-        ctx.fill();
-      }
-    }
-  }, [getCanvasCoordinates, tool, clearOverlay]);
+    drawEntryPoint(ctx, pos.x, pos.y, pos.pressure);
+  }, [getCanvasCoordinates, clearOverlay, drawEntryPoint]);
 
   const draw = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawing) return;
@@ -360,30 +451,26 @@ export const CalligraphyChecker = () => {
     if (!pos || !lastPos) return;
 
     const currentTime = Date.now();
-    const timeDelta = currentTime - lastTime;
-    const distance = Math.sqrt((pos.x - lastPos.x) ** 2 + (pos.y - lastPos.y) ** 2);
-    const velocity = timeDelta > 0 ? distance / timeDelta * 10 : 0;
+    const timeDelta = Math.max(1, currentTime - lastTime);
+    const dx = pos.x - lastPos.x;
+    const dy = pos.y - lastPos.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const velocity = distance / timeDelta * 10;
 
-    if (tool === 'brush') {
-      drawBrushStroke(ctx, lastPos.x, lastPos.y, pos.x, pos.y, lastPressure, pos.pressure, velocity);
-    } else if (tool === 'eraser') {
-      ctx.beginPath();
-      ctx.moveTo(lastPos.x, lastPos.y);
-      ctx.lineTo(pos.x, pos.y);
-      ctx.strokeStyle = '#FAF6F0';
-      ctx.lineWidth = 30;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.stroke();
-    }
+    // 移動方向から角度を計算
+    const angle = distance > 1 ? Math.atan2(dy, dx) : lastAngle;
+
+    drawBrushStroke(ctx, lastPos.x, lastPos.y, pos.x, pos.y, lastPressure, pos.pressure, velocity, angle);
 
     setLastPos({ x: pos.x, y: pos.y });
     setLastPressure(pos.pressure);
     setLastTime(currentTime);
-  }, [isDrawing, getCanvasCoordinates, lastPos, lastPressure, lastTime, tool, drawBrushStroke]);
+    setLastAngle(angle);
+  }, [isDrawing, getCanvasCoordinates, lastPos, lastPressure, lastTime, lastAngle, drawBrushStroke]);
 
   const stopDrawing = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawing) return;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
 
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
@@ -393,34 +480,22 @@ export const CalligraphyChecker = () => {
       return;
     }
 
-    // 終点の表現（はね・払い）
-    if (tool === 'brush') {
-      const pos = getCanvasCoordinates(e);
-      if (pos) {
-        // 払いの先細り効果
-        const endX = lastPos.x + (pos.x - lastPos.x) * 0.5;
-        const endY = lastPos.y + (pos.y - lastPos.y) * 0.5;
+    const pos = getCanvasCoordinates(e);
+    if (pos) {
+      const currentTime = Date.now();
+      const timeDelta = Math.max(1, currentTime - lastTime);
+      const dx = pos.x - lastPos.x;
+      const dy = pos.y - lastPos.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      const velocity = distance / timeDelta * 10;
 
-        for (let i = 0; i < 3; i++) {
-          const t = i / 3;
-          const size = 4 * (1 - t);
-          ctx.beginPath();
-          ctx.arc(
-            lastPos.x + (endX - lastPos.x) * t + (Math.random() - 0.5) * 2,
-            lastPos.y + (endY - lastPos.y) * t + (Math.random() - 0.5) * 2,
-            size,
-            0,
-            Math.PI * 2
-          );
-          ctx.fillStyle = `rgba(20, 20, 30, ${0.3 * (1 - t)})`;
-          ctx.fill();
-        }
-      }
+      // 払い・はねを描画
+      drawExitPoint(ctx, pos.x, pos.y, velocity, lastAngle);
     }
 
     setIsDrawing(false);
     setLastPos(null);
-  }, [isDrawing, lastPos, tool, getCanvasCoordinates]);
+  }, [isDrawing, lastPos, lastTime, lastAngle, getCanvasCoordinates, drawExitPoint]);
 
   const clearCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -439,21 +514,32 @@ export const CalligraphyChecker = () => {
   // 採点を実行
   const handleGrading = useCallback(async () => {
     const canvas = canvasRef.current;
-    if (!canvas || isGenerating) return;
+    if (!canvas) {
+      console.error('Canvas not found');
+      return;
+    }
+    if (isGenerating) {
+      console.log('Already generating');
+      return;
+    }
+    if (status !== 'available') {
+      console.log('API not available:', status);
+      return;
+    }
 
     setGradingResult(null);
     setShowMarkers(false);
     setMarkerAnimationIndex(0);
     clearOverlay();
 
-    try {
-      const prompt = `この習字を採点してください。お手本の文字は「${selectedChar.char}」（${selectedChar.reading}）です。${selectedChar.description}の練習として書かれています。JSON形式のみで回答してください。`;
+    const prompt = `この習字を採点してください。お手本の文字は「${selectedChar.char}」（${selectedChar.reading}）です。${selectedChar.description}の練習として書かれています。JSON形式のみで回答してください。`;
 
+    try {
       await sendMessage(prompt, canvas);
     } catch (error) {
       console.error('Grading error:', error);
     }
-  }, [canvasRef, isGenerating, selectedChar, sendMessage, clearOverlay]);
+  }, [isGenerating, status, selectedChar, sendMessage, clearOverlay]);
 
   // AIレスポンスからJSONを抽出してパース
   useEffect(() => {
@@ -500,6 +586,11 @@ export const CalligraphyChecker = () => {
           {apiError || 'Prompt API が利用できません'}
         </div>
       )}
+      {status === 'checking' && (
+        <div className="px-4 py-2 bg-yellow-500 text-white text-sm">
+          API確認中...
+        </div>
+      )}
 
       <div className="flex-1 flex flex-col lg:flex-row gap-4 p-4 overflow-hidden">
         {/* Canvas Area */}
@@ -526,37 +617,17 @@ export const CalligraphyChecker = () => {
 
             <div className="w-px h-6 bg-[hsl(var(--border))]" />
 
-            {/* Tools */}
-            <div className="flex gap-1 p-1 bg-[hsl(var(--background))] rounded">
-              <button
-                onClick={() => setTool('brush')}
-                className={`p-2 rounded transition-colors ${
-                  tool === 'brush'
-                    ? 'bg-[hsl(var(--primary))] text-white'
-                    : 'hover:bg-[hsl(var(--secondary))]'
-                }`}
-                title="筆"
-              >
-                <Pen className="w-5 h-5" />
-              </button>
-              <button
-                onClick={() => setTool('eraser')}
-                className={`p-2 rounded transition-colors ${
-                  tool === 'eraser'
-                    ? 'bg-[hsl(var(--primary))] text-white'
-                    : 'hover:bg-[hsl(var(--secondary))]'
-                }`}
-                title="消しゴム"
-              >
-                <Eraser className="w-5 h-5" />
-              </button>
+            {/* Brush indicator */}
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-[hsl(var(--background))] rounded">
+              <Pen className="w-5 h-5" />
+              <span className="text-sm">毛筆</span>
             </div>
 
             {/* Clear Button */}
             <button
               onClick={clearCanvas}
               className="p-2 bg-red-500 text-white rounded hover:bg-red-600 transition-colors"
-              title="クリア"
+              title="書き直す"
             >
               <Trash2 className="w-5 h-5" />
             </button>
@@ -597,10 +668,12 @@ export const CalligraphyChecker = () => {
                   onPointerMove={draw}
                   onPointerUp={stopDrawing}
                   onPointerLeave={stopDrawing}
-                  className="max-w-full max-h-full cursor-crosshair touch-none shadow-lg"
+                  onPointerCancel={stopDrawing}
+                  className="max-w-full max-h-full touch-none shadow-lg"
                   style={{
                     imageRendering: 'auto',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.3), inset 0 0 30px rgba(0,0,0,0.05)'
+                    boxShadow: '0 4px 20px rgba(0,0,0,0.3), inset 0 0 30px rgba(0,0,0,0.05)',
+                    cursor: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'24\' height=\'24\' viewBox=\'0 0 24 24\'%3E%3Ccircle cx=\'12\' cy=\'12\' r=\'8\' fill=\'%23333\' fill-opacity=\'0.3\'/%3E%3Ccircle cx=\'12\' cy=\'12\' r=\'2\' fill=\'%23333\'/%3E%3C/svg%3E") 12 12, crosshair'
                   }}
                 />
                 {/* オーバーレイキャンバス（赤丸マーカー用） */}
@@ -617,7 +690,7 @@ export const CalligraphyChecker = () => {
               <div className="absolute top-4 right-4 bg-white/90 rounded-lg p-4 shadow-lg border-2 border-amber-200">
                 <div className="text-xs text-gray-500 mb-1 text-center">お手本</div>
                 <div
-                  className="text-7xl text-gray-800 leading-none"
+                  className="text-8xl text-gray-800 leading-none"
                   style={{
                     fontFamily: "'Noto Serif JP', serif",
                     fontWeight: 900,
@@ -625,7 +698,7 @@ export const CalligraphyChecker = () => {
                 >
                   {selectedChar.char}
                 </div>
-                <div className="text-xs text-gray-500 mt-2 text-center max-w-[100px]">
+                <div className="text-xs text-gray-500 mt-2 text-center max-w-[120px]">
                   {selectedChar.description}
                 </div>
               </div>
@@ -652,6 +725,11 @@ export const CalligraphyChecker = () => {
                   お手本を見ながら文字を書いて、<br />
                   「採点する」ボタンを押してください
                 </p>
+                {status !== 'available' && (
+                  <p className="text-xs text-yellow-400 mt-4">
+                    ※ AIモデルの準備が完了すると採点できます
+                  </p>
+                )}
               </div>
             ) : (
               <>
