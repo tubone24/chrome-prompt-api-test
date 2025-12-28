@@ -60,11 +60,21 @@ const GRADING_SCHEMA = {
   required: ['score', 'overallComment', 'details']
 };
 
-// 毛筆の毛（bristle）を表現するクラス
+// 毛筆の毛（bristle）を表現する構造
+// 実際の筆は先が尖っており、筆圧で毛が広がる
 interface Bristle {
-  offset: number;      // 中心からのオフセット（-1〜1）
-  thickness: number;   // 毛の太さ係数
-  inkAmount: number;   // インク量（カスレに影響）
+  // 筆先からの距離（0=先端、1=根本）
+  distanceFromTip: number;
+  // 中心からの横方向オフセット（-1〜1、先端ほど0に近い）
+  lateralOffset: number;
+  // 毛の太さ係数
+  thickness: number;
+  // インク保持量（0〜1、先端ほど少ない）
+  inkCapacity: number;
+  // 現在のインク量
+  currentInk: number;
+  // 毛の剛性（先端ほど柔らかい）
+  stiffness: number;
 }
 
 export const CalligraphyChecker = () => {
@@ -87,18 +97,44 @@ export const CalligraphyChecker = () => {
 
   // 毛筆の毛を初期化（複数の毛で構成）
   const bristlesRef = useRef<Bristle[]>([]);
+  // ストローク中のインク消費を追跡
+  const strokeInkRef = useRef<number>(1.0);
 
-  // 毛を初期化
+  // 毛を初期化 - 筆先の形状をシミュレート
   useEffect(() => {
     const bristles: Bristle[] = [];
-    const bristleCount = 40; // 毛の本数
-    for (let i = 0; i < bristleCount; i++) {
-      bristles.push({
-        offset: (Math.random() - 0.5) * 2,
-        thickness: 0.5 + Math.random() * 0.5,
-        inkAmount: 0.7 + Math.random() * 0.3,
-      });
+
+    // 筆先の形状: 先端は尖り、根本に向かって広がる
+    // 層ごとに毛を配置
+    const layers = 8; // 先端から根本までの層数
+
+    for (let layer = 0; layer < layers; layer++) {
+      const distanceFromTip = layer / (layers - 1); // 0〜1
+
+      // 各層の毛の本数（先端は少なく、根本は多い）
+      const bristlesInLayer = Math.floor(3 + distanceFromTip * 12);
+
+      // 各層の広がり幅（先端は狭く、根本は広い）
+      const layerSpread = 0.1 + distanceFromTip * 0.9;
+
+      for (let i = 0; i < bristlesInLayer; i++) {
+        // 層内での位置（中心に近いほど密度が高い）
+        const normalizedPos = (i / (bristlesInLayer - 1 || 1)) * 2 - 1; // -1〜1
+        // ガウス分布的な配置（中心に密集）
+        const gaussianOffset = normalizedPos * Math.pow(Math.abs(normalizedPos), 0.5);
+        const lateralOffset = gaussianOffset * layerSpread;
+
+        bristles.push({
+          distanceFromTip,
+          lateralOffset: lateralOffset + (Math.random() - 0.5) * 0.1, // 少しランダム性
+          thickness: 0.6 + Math.random() * 0.4 + distanceFromTip * 0.3, // 根本ほど太い
+          inkCapacity: 0.5 + distanceFromTip * 0.5, // 根本ほど墨を多く保持
+          currentInk: 1.0,
+          stiffness: 0.3 + distanceFromTip * 0.7, // 先端は柔らかく、根本は硬い
+        });
+      }
     }
+
     bristlesRef.current = bristles;
   }, []);
 
@@ -313,7 +349,7 @@ export const CalligraphyChecker = () => {
     };
   }, []);
 
-  // 毛筆のストロークを描画（カスレ、止め・はね・払い表現）
+  // 毛筆のストロークを描画（本物の筆の挙動をシミュレート）
   const drawBrushStroke = useCallback((
     ctx: CanvasRenderingContext2D,
     fromX: number,
@@ -328,11 +364,19 @@ export const CalligraphyChecker = () => {
     const distance = Math.sqrt((toX - fromX) ** 2 + (toY - fromY) ** 2);
     if (distance < 0.5) return;
 
-    const steps = Math.max(1, Math.floor(distance));
     const bristles = bristlesRef.current;
+    const steps = Math.max(2, Math.floor(distance * 1.5));
 
-    // 基本の筆の太さ（大きめに）
-    const baseWidth = 35;
+    // 基本の筆の最大幅
+    const maxBrushWidth = 40;
+
+    // インク消費（距離に応じて減少）
+    const inkConsumption = distance * 0.001 * (1 + velocity * 0.002);
+    strokeInkRef.current = Math.max(0.1, strokeInkRef.current - inkConsumption);
+    const strokeInk = strokeInkRef.current;
+
+    // 速度に応じたカスレ強度
+    const velocityKasure = Math.min(0.8, velocity * 0.003);
 
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
@@ -340,113 +384,218 @@ export const CalligraphyChecker = () => {
       const y = fromY + (toY - fromY) * t;
       const pressure = fromPressure + (toPressure - fromPressure) * t;
 
-      // 筆圧に応じた太さ（強く押すと太く）
-      const pressureWidth = baseWidth * (0.4 + pressure * 0.8);
+      // 筆圧による毛の広がり
+      // 軽い筆圧 = 先端の毛だけが紙に触れる
+      // 強い筆圧 = 根本まで全ての毛が紙に触れる
+      const pressureThreshold = 1 - pressure; // 0〜1（筆圧が強いほど0に近い）
 
-      // 速度に応じたカスレ効果（速いほどカスレる）
-      const kasureIntensity = Math.min(1, velocity * 0.004);
+      // 筆圧による幅
+      const currentWidth = maxBrushWidth * (0.15 + pressure * 0.85);
+
+      // 進行方向に対して垂直な角度
+      const perpAngle = angle + Math.PI / 2;
 
       // 各毛を描画
       bristles.forEach((bristle) => {
-        // カスレ：速度が速いとインクが途切れる
-        if (Math.random() < kasureIntensity * 0.6) return;
+        // 筆圧が低いと先端の毛だけが描画される
+        if (bristle.distanceFromTip < pressureThreshold * 0.8) return;
 
-        // 毛の位置を計算（角度を考慮）
-        const perpAngle = angle + Math.PI / 2;
-        const offsetX = Math.cos(perpAngle) * bristle.offset * pressureWidth * 0.5;
-        const offsetY = Math.sin(perpAngle) * bristle.offset * pressureWidth * 0.5;
+        // インク量計算
+        const bristleInk = bristle.currentInk * strokeInk * bristle.inkCapacity;
 
-        // 毛の太さ
-        const bristleWidth = pressureWidth * bristle.thickness * 0.15;
+        // カスレ判定（インクが少ない + 速度が速い = カスレる）
+        const kasureChance = velocityKasure + (1 - bristleInk) * 0.3;
+        // 中心の毛はカスレにくく、端の毛はカスレやすい
+        const edgeFactor = Math.abs(bristle.lateralOffset);
+        if (Math.random() < kasureChance * (0.5 + edgeFactor * 0.5)) return;
 
-        // インク量に応じた透明度
-        const alpha = bristle.inkAmount * (0.7 - kasureIntensity * 0.4) * (0.8 + Math.random() * 0.2);
+        // 毛の位置計算
+        // 筆圧に応じて毛が広がる（柔らかい毛ほど広がりやすい）
+        const spreadFactor = pressure * (1 - bristle.stiffness * 0.5);
+        const lateralPos = bristle.lateralOffset * spreadFactor * currentWidth;
 
+        const bx = x + Math.cos(perpAngle) * lateralPos;
+        const by = y + Math.sin(perpAngle) * lateralPos;
+
+        // 毛の太さ（中心は太く、端は細い）
+        const centerFactor = 1 - Math.abs(bristle.lateralOffset) * 0.5;
+        const bristleSize = bristle.thickness * (1.5 + pressure * 2) * centerFactor;
+
+        // 墨の濃さ（中心は濃く、端は薄い）
+        const inkAlpha = Math.min(0.95, bristleInk * (0.6 + centerFactor * 0.4));
+
+        // 墨色（純黒ではなく、やや青みがかった黒）
+        const r = 15 + Math.random() * 10;
+        const g = 15 + Math.random() * 8;
+        const b = 20 + Math.random() * 15;
+
+        // メインの描画
         ctx.beginPath();
-        ctx.arc(
-          x + offsetX + (Math.random() - 0.5) * 2,
-          y + offsetY + (Math.random() - 0.5) * 2,
-          bristleWidth,
-          0,
-          Math.PI * 2
-        );
-        ctx.fillStyle = `rgba(15, 15, 25, ${Math.max(0.05, alpha)})`;
+        ctx.arc(bx, by, bristleSize, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${inkAlpha})`;
         ctx.fill();
+
+        // 毛のテクスチャ（微細な線を追加）
+        if (Math.random() > 0.7 && bristleInk > 0.3) {
+          ctx.beginPath();
+          ctx.moveTo(bx - bristleSize * 0.5, by);
+          ctx.lineTo(bx + bristleSize * 0.5, by);
+          ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${inkAlpha * 0.5})`;
+          ctx.lineWidth = bristleSize * 0.3;
+          ctx.stroke();
+        }
       });
 
-      // 墨のにじみ効果（筆圧が強いところ）
-      if (pressure > 0.7 && Math.random() > 0.85) {
+      // 墨だまり（筆圧が強く、速度が遅いところ）
+      if (pressure > 0.6 && velocity < 50 && Math.random() > 0.8) {
+        const poolSize = currentWidth * 0.3 * (1 - velocity * 0.01);
         ctx.beginPath();
-        ctx.arc(x, y, pressureWidth * 0.6, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(15, 15, 25, 0.03)';
+        ctx.arc(x, y, poolSize, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(10, 10, 20, ${0.02 + strokeInk * 0.03})`;
+        ctx.fill();
+      }
+
+      // エッジのにじみ
+      if (pressure > 0.5 && strokeInk > 0.5 && Math.random() > 0.9) {
+        const edgeX = x + Math.cos(perpAngle) * currentWidth * 0.5 * (Math.random() > 0.5 ? 1 : -1);
+        const edgeY = y + Math.sin(perpAngle) * currentWidth * 0.5 * (Math.random() > 0.5 ? 1 : -1);
+        ctx.beginPath();
+        ctx.arc(edgeX, edgeY, 2 + Math.random() * 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(15, 15, 25, ${0.05 + Math.random() * 0.05})`;
         ctx.fill();
       }
     }
   }, []);
 
-  // 始点の「入り」を描画
+  // 始点の「入り」を描画 - 筆が紙に触れる瞬間
   const drawEntryPoint = useCallback((
     ctx: CanvasRenderingContext2D,
     x: number,
     y: number,
-    pressure: number
+    pressure: number,
+    angle: number
   ) => {
-    const baseSize = 20 * (0.5 + pressure * 0.5);
-    const bristles = bristlesRef.current;
+    // インクをリセット
+    strokeInkRef.current = 1.0;
 
-    // 始点の墨だまり
+    const bristles = bristlesRef.current;
+    const entrySize = 15 * (0.6 + pressure * 0.6);
+
+    // 入りの角度（筆が斜めに入る）
+    const entryAngle = angle - Math.PI * 0.1;
+
+    // 筆先が紙に触れる形を描画
     bristles.forEach((bristle) => {
-      const offsetX = bristle.offset * baseSize * 0.3;
-      const offsetY = bristle.offset * baseSize * 0.3;
-      const size = baseSize * bristle.thickness * 0.3;
+      // 先端の毛だけが最初に触れる
+      if (bristle.distanceFromTip > 0.4) return;
+
+      const spread = pressure * 0.5;
+      const perpAngle = entryAngle + Math.PI / 2;
+      const lateralPos = bristle.lateralOffset * spread * entrySize;
+
+      const bx = x + Math.cos(perpAngle) * lateralPos + Math.cos(entryAngle) * bristle.distanceFromTip * 5;
+      const by = y + Math.sin(perpAngle) * lateralPos + Math.sin(entryAngle) * bristle.distanceFromTip * 5;
+
+      const size = bristle.thickness * (2 + pressure * 2);
+      const alpha = 0.5 + pressure * 0.4;
 
       ctx.beginPath();
-      ctx.arc(
-        x + offsetX + (Math.random() - 0.5) * baseSize * 0.2,
-        y + offsetY + (Math.random() - 0.5) * baseSize * 0.2,
-        size,
-        0,
-        Math.PI * 2
-      );
-      ctx.fillStyle = `rgba(15, 15, 25, ${0.4 + Math.random() * 0.3})`;
+      ctx.arc(bx, by, size, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(15, 15, 25, ${alpha})`;
       ctx.fill();
     });
+
+    // 入りの墨だまり（筆が一瞬止まるところ）
+    if (pressure > 0.4) {
+      ctx.beginPath();
+      ctx.arc(x, y, entrySize * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(10, 10, 20, ${0.1 + pressure * 0.1})`;
+      ctx.fill();
+    }
   }, []);
 
-  // 終点の「払い」「はね」を描画
+  // 終点の「払い」「はね」「止め」を描画
   const drawExitPoint = useCallback((
     ctx: CanvasRenderingContext2D,
     x: number,
     y: number,
     velocity: number,
-    angle: number
+    angle: number,
+    pressure: number
   ) => {
-    // 払いの長さ（速度に応じて）
-    const haraiLength = Math.min(40, velocity * 0.5);
-    const steps = Math.floor(haraiLength);
+    const bristles = bristlesRef.current;
+    const strokeInk = strokeInkRef.current;
 
-    for (let i = 0; i < steps; i++) {
-      const t = i / steps;
-      const size = 8 * (1 - t * t); // 先細り（2次曲線的に）
-      const alpha = 0.5 * (1 - t);
+    // 速度が低い場合は「止め」、高い場合は「払い」
+    const isTome = velocity < 30;
+    const isHane = velocity > 80 && Math.abs(Math.sin(angle)) > 0.5; // 上方向への速い動き
 
-      const px = x + Math.cos(angle) * i * 1.5;
-      const py = y + Math.sin(angle) * i * 1.5;
+    if (isTome) {
+      // 止め - 筆を押し付けて止める
+      const tomeSize = 12 * (0.5 + pressure * 0.5);
 
-      // カスレながら払う
-      for (let j = 0; j < 3; j++) {
-        if (Math.random() < t * 0.5) continue; // 先に行くほどカスレる
+      // 止めの墨だまり
+      bristles.forEach((bristle) => {
+        if (bristle.distanceFromTip > 0.6) return;
+
+        const spread = pressure * 0.4;
+        const perpAngle = angle + Math.PI / 2;
+        const lateralPos = bristle.lateralOffset * spread * tomeSize;
+
+        const bx = x + Math.cos(perpAngle) * lateralPos;
+        const by = y + Math.sin(perpAngle) * lateralPos;
+        const size = bristle.thickness * (1.5 + pressure);
+        const alpha = strokeInk * 0.6;
 
         ctx.beginPath();
-        ctx.arc(
-          px + (Math.random() - 0.5) * size,
-          py + (Math.random() - 0.5) * size,
-          size * (0.2 + Math.random() * 0.3),
-          0,
-          Math.PI * 2
-        );
-        ctx.fillStyle = `rgba(15, 15, 25, ${alpha * (0.5 + Math.random() * 0.5)})`;
+        ctx.arc(bx, by, size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(15, 15, 25, ${alpha})`;
         ctx.fill();
+      });
+    } else {
+      // 払い/はね - 筆を持ち上げながら抜く
+      const haraiLength = isHane ? Math.min(50, velocity * 0.4) : Math.min(35, velocity * 0.3);
+      const steps = Math.max(10, Math.floor(haraiLength));
+
+      // はねは上方向に曲がる
+      const curveAmount = isHane ? 0.3 : 0;
+
+      for (let i = 0; i < steps; i++) {
+        const t = i / steps;
+
+        // 先細りの曲線（3次曲線的に）
+        const widthDecay = Math.pow(1 - t, 2);
+        const currentWidth = 15 * widthDecay;
+
+        // 進行方向（はねは曲がる）
+        const currentAngle = angle - curveAmount * t * Math.PI;
+
+        const px = x + Math.cos(currentAngle) * i * 2;
+        const py = y + Math.sin(currentAngle) * i * 2;
+
+        // カスレ強度（先に行くほど強く）
+        const kasure = t * 0.8 + (1 - strokeInk) * 0.2;
+
+        // 個別の毛の軌跡を描画
+        bristles.forEach((bristle) => {
+          // 先端の毛だけが最後まで残る
+          if (bristle.distanceFromTip > widthDecay * 0.8) return;
+          if (Math.random() < kasure) return;
+
+          const perpAngle = currentAngle + Math.PI / 2;
+          const lateralPos = bristle.lateralOffset * currentWidth * widthDecay;
+
+          const bx = px + Math.cos(perpAngle) * lateralPos + (Math.random() - 0.5) * 2;
+          const by = py + Math.sin(perpAngle) * lateralPos + (Math.random() - 0.5) * 2;
+
+          const size = bristle.thickness * (1 + widthDecay) * 0.8;
+          const alpha = strokeInk * widthDecay * 0.6;
+
+          ctx.beginPath();
+          ctx.arc(bx, by, size, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(15, 15, 25, ${alpha})`;
+          ctx.fill();
+        });
       }
     }
   }, []);
@@ -474,7 +623,9 @@ export const CalligraphyChecker = () => {
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx) return;
 
-    drawEntryPoint(ctx, pos.x, pos.y, pos.pressure);
+    // 初期角度（下向きをデフォルト）
+    const initialAngle = Math.PI / 2;
+    drawEntryPoint(ctx, pos.x, pos.y, pos.pressure, initialAngle);
   }, [getCanvasCoordinates, clearOverlay, drawEntryPoint]);
 
   const draw = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -527,13 +678,13 @@ export const CalligraphyChecker = () => {
       const distance = Math.sqrt(dx * dx + dy * dy);
       const velocity = distance / timeDelta * 10;
 
-      // 払い・はねを描画
-      drawExitPoint(ctx, pos.x, pos.y, velocity, lastAngle);
+      // 払い・はね・止めを描画
+      drawExitPoint(ctx, pos.x, pos.y, velocity, lastAngle, lastPressure);
     }
 
     setIsDrawing(false);
     setLastPos(null);
-  }, [isDrawing, lastPos, lastTime, lastAngle, getCanvasCoordinates, drawExitPoint]);
+  }, [isDrawing, lastPos, lastTime, lastAngle, lastPressure, getCanvasCoordinates, drawExitPoint]);
 
   const clearCanvas = useCallback(() => {
     const canvas = canvasRef.current;
