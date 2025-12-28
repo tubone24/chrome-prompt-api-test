@@ -960,8 +960,8 @@ export const CalligraphyChecker = () => {
           <div className="flex-1 flex gap-4 min-h-0">
             {/* Main Canvas */}
             <div className="flex-1 flex items-center justify-center bg-[hsl(var(--secondary))] rounded-lg overflow-hidden relative">
-              {/* 半紙キャンバス */}
-              <div className="relative">
+              {/* 半紙キャンバス - 両キャンバスを同じサイズで重ねる */}
+              <div className="relative" style={{ width: '800px', height: '600px', maxWidth: '100%', maxHeight: '100%' }}>
                 <canvas
                   ref={canvasRef}
                   width={800}
@@ -971,8 +971,10 @@ export const CalligraphyChecker = () => {
                   onPointerUp={stopDrawing}
                   onPointerLeave={stopDrawing}
                   onPointerCancel={stopDrawing}
-                  className="max-w-full max-h-full touch-none shadow-lg"
+                  className="touch-none shadow-lg"
                   style={{
+                    width: '100%',
+                    height: '100%',
                     imageRendering: 'auto',
                     boxShadow: '0 4px 20px rgba(0,0,0,0.3), inset 0 0 30px rgba(0,0,0,0.05)',
                     cursor: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'24\' height=\'24\' viewBox=\'0 0 24 24\'%3E%3Ccircle cx=\'12\' cy=\'12\' r=\'8\' fill=\'%23333\' fill-opacity=\'0.3\'/%3E%3Ccircle cx=\'12\' cy=\'12\' r=\'2\' fill=\'%23333\'/%3E%3C/svg%3E") 12 12, crosshair'
@@ -983,8 +985,8 @@ export const CalligraphyChecker = () => {
                   ref={overlayCanvasRef}
                   width={800}
                   height={600}
-                  className="absolute top-0 left-0 max-w-full max-h-full pointer-events-none"
-                  style={{ imageRendering: 'auto' }}
+                  className="absolute top-0 left-0 pointer-events-none"
+                  style={{ width: '100%', height: '100%', imageRendering: 'auto' }}
                 />
               </div>
 
