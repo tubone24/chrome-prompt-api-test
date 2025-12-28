@@ -576,9 +576,9 @@ export const CalligraphyChecker = () => {
             overallComment: String(parsed.overallComment),
             details: Array.isArray(parsed.details) ? parsed.details : []
           };
-        } else if (parsed.assessment) {
-          // 代替フォーマット（assessment構造）
-          const assessment = parsed.assessment;
+        } else if (parsed.assessment || parsed.evaluation) {
+          // 代替フォーマット（assessment/evaluation構造）
+          const assessment = parsed.assessment || parsed.evaluation;
 
           // スコアを探す（様々なキー名に対応）
           let score = 0;
@@ -591,22 +591,66 @@ export const CalligraphyChecker = () => {
             score = Math.round(Number(assessment.overall_score) * 10);
           }
 
-          // コメントを構築（detailed_feedbackがオブジェクトの場合も対応）
+          // コメントを構築（様々なフォーマットに対応）
           let comment = '';
+
+          // 直接のコメントフィールドを探す
+          if (typeof assessment.overall_impression === 'string') {
+            comment = assessment.overall_impression;
+          } else if (typeof assessment.comments === 'string') {
+            comment = assessment.comments;
+          } else if (typeof assessment.comment === 'string') {
+            comment = assessment.comment;
+          } else if (typeof assessment.feedback === 'string') {
+            comment = assessment.feedback;
+          } else if (typeof assessment.notes === 'string') {
+            comment = assessment.notes;
+          }
 
           // detailed_feedback がオブジェクトの場合、各フィードバックを結合
           if (assessment.detailed_feedback && typeof assessment.detailed_feedback === 'object') {
             const feedbackEntries = Object.entries(assessment.detailed_feedback);
-            comment = feedbackEntries.map(([, value]) => value).join('\n\n');
+            const feedbackText = feedbackEntries.map(([, value]) => {
+              if (typeof value === 'string') return value;
+              if (typeof value === 'object' && value !== null) {
+                return Object.values(value).filter(v => typeof v === 'string').join(' ');
+              }
+              return String(value);
+            }).join('\n\n');
+            comment = comment ? `${comment}\n\n${feedbackText}` : feedbackText;
           }
 
-          // 他のコメントソースも試す
+          // specific_comments がある場合
+          if (assessment.specific_comments && typeof assessment.specific_comments === 'object') {
+            const specificEntries = Object.entries(assessment.specific_comments);
+            const specificText = specificEntries.map(([key, value]) => {
+              if (typeof value === 'string') return `【${key}】${value}`;
+              if (typeof value === 'object' && value !== null) {
+                const vals = Object.values(value).filter(v => typeof v === 'string');
+                return `【${key}】${vals.join(' ')}`;
+              }
+              return `【${key}】${String(value)}`;
+            }).join('\n');
+            comment = comment ? `${comment}\n\n${specificText}` : specificText;
+          }
+
+          // まだコメントがない場合、assessment内の全ての文字列値を探す
           if (!comment) {
-            comment = assessment.overall_impression
-              || assessment.comments
-              || assessment.comment
-              || assessment.notes
-              || '';
+            const extractStrings = (obj: Record<string, unknown>, depth = 0): string[] => {
+              if (depth > 2) return [];
+              const strings: string[] = [];
+              for (const [key, value] of Object.entries(obj)) {
+                if (key === 'score' || key === 'overall_score' || key === 'scale') continue;
+                if (typeof value === 'string' && value.length > 5) {
+                  strings.push(value);
+                } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                  strings.push(...extractStrings(value as Record<string, unknown>, depth + 1));
+                }
+              }
+              return strings;
+            };
+            const allStrings = extractStrings(assessment);
+            comment = allStrings.join('\n\n');
           }
 
           // suggestionsがあれば追加
@@ -624,15 +668,32 @@ export const CalligraphyChecker = () => {
 
           // detailsがない場合、ランダムな位置に赤丸を生成（指摘がある場合）
           const details: FeedbackDetail[] = [];
-          if (assessment.detailed_feedback && typeof assessment.detailed_feedback === 'object') {
-            const feedbackKeys = Object.keys(assessment.detailed_feedback);
+
+          // detailed_feedback, specific_comments など様々なフィードバック構造に対応
+          const feedbackSource = assessment.detailed_feedback
+            || assessment.specific_comments
+            || assessment.feedback_items
+            || assessment.points;
+
+          if (feedbackSource && typeof feedbackSource === 'object') {
+            const feedbackKeys = Object.keys(feedbackSource);
             // 最大3つの指摘箇所を生成
             const numMarkers = Math.min(3, feedbackKeys.length);
             for (let i = 0; i < numMarkers; i++) {
+              const feedbackValue = feedbackSource[feedbackKeys[i]];
+              let commentText: string;
+              if (typeof feedbackValue === 'string') {
+                commentText = feedbackValue;
+              } else if (typeof feedbackValue === 'object' && feedbackValue !== null) {
+                const vals = Object.values(feedbackValue).filter(v => typeof v === 'string');
+                commentText = vals.join(' ') || String(feedbackValue);
+              } else {
+                commentText = String(feedbackValue);
+              }
               details.push({
                 x: 200 + Math.random() * 400, // 200-600の範囲
                 y: 150 + Math.random() * 300, // 150-450の範囲
-                comment: String(assessment.detailed_feedback[feedbackKeys[i]])
+                comment: commentText
               });
             }
           }
