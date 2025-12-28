@@ -29,6 +29,37 @@ const SAMPLE_CHARACTERS = [
   { char: '心', reading: 'こころ', description: '点と曲線' },
 ];
 
+// 構造化出力のためのJSONスキーマ
+const GRADING_SCHEMA = {
+  type: 'object',
+  properties: {
+    score: {
+      type: 'integer',
+      minimum: 0,
+      maximum: 100,
+      description: '0〜100点での評価'
+    },
+    overallComment: {
+      type: 'string',
+      description: 'タメ語での総評コメント'
+    },
+    details: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          x: { type: 'integer', minimum: 0, maximum: 800 },
+          y: { type: 'integer', minimum: 0, maximum: 600 },
+          comment: { type: 'string' }
+        },
+        required: ['x', 'y', 'comment']
+      },
+      description: '指摘箇所の配列'
+    }
+  },
+  required: ['score', 'overallComment', 'details']
+};
+
 // 毛筆の毛（bristle）を表現するクラス
 interface Bristle {
   offset: number;      // 中心からのオフセット（-1〜1）
@@ -84,14 +115,15 @@ export const CalligraphyChecker = () => {
     systemPrompt: `あなたは厳しくも優しい書道の先生だ。生徒の習字を採点する。
 タメ語で指導すること。
 
-【重要】以下の正確なJSON形式のみで回答せよ。マークダウンや説明文は不要：
-{"score":75,"overallComment":"コメント","details":[{"x":400,"y":300,"comment":"指摘"}]}
+採点基準：
+- 筆の運び、止め・はね・払いの表現
+- 文字全体のバランスと形
+- お手本との比較
 
-- score: 0〜100の整数
-- overallComment: タメ語での総評
-- details: 指摘箇所の配列（x:0-800, y:0-600）`,
+指摘箇所のx,yは書かれた文字の問題がある位置を指定すること。`,
     multimodal: true,
     temperature: 0.5,
+    responseConstraint: GRADING_SCHEMA,
   });
 
   useEffect(() => {
