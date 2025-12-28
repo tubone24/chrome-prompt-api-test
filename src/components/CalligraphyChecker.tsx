@@ -704,27 +704,79 @@ export const CalligraphyChecker = () => {
             details
           };
         } else {
-          // その他のフォーマット - スコアやコメントを探す
+          // その他のフォーマット（トップレベルにスコアやコメントがある場合）
           let score = 0;
           let comment = '';
 
-          // トップレベルでスコアを探す
+          // トップレベルでスコアを探す（様々なキー名に対応）
           if (parsed.score !== undefined) {
             score = Number(parsed.score);
+            if (score <= 10) score = Math.round(score * 10);
+          } else if (parsed.overall_score !== undefined) {
+            score = Number(parsed.overall_score);
             if (score <= 10) score = Math.round(score * 10);
           }
 
           // コメントを探す
-          comment = parsed.overallComment
-            || parsed.comment
-            || parsed.comments
-            || parsed.feedback
-            || JSON.stringify(parsed, null, 2);
+          if (typeof parsed.overallComment === 'string') {
+            comment = parsed.overallComment;
+          } else if (typeof parsed.comment === 'string') {
+            comment = parsed.comment;
+          } else if (typeof parsed.comments === 'string') {
+            comment = parsed.comments;
+          } else if (typeof parsed.feedback === 'string') {
+            comment = parsed.feedback;
+          }
+
+          // suggestionsがあれば追加（文字列または配列）
+          if (typeof parsed.suggestions === 'string' && parsed.suggestions) {
+            const suggestionsText = '\n\n【改善点】\n' + parsed.suggestions;
+            comment = comment ? comment + suggestionsText : suggestionsText;
+          } else if (Array.isArray(parsed.suggestions) && parsed.suggestions.length > 0) {
+            const suggestionsText = '\n\n【改善点】\n' + parsed.suggestions.map((s: string) => `・${s}`).join('\n');
+            comment = comment ? comment + suggestionsText : suggestionsText;
+          }
+
+          if (!comment) {
+            comment = '採点完了';
+          }
+
+          // detailsを生成（breakdownがあれば使用）
+          const details: FeedbackDetail[] = [];
+          const breakdownSource = parsed.breakdown || parsed.details_breakdown || parsed.stroke_feedback;
+
+          if (breakdownSource && typeof breakdownSource === 'object') {
+            const breakdownKeys = Object.keys(breakdownSource);
+            const numMarkers = Math.min(3, breakdownKeys.length);
+            for (let i = 0; i < numMarkers; i++) {
+              const item = breakdownSource[breakdownKeys[i]];
+              let commentText: string;
+              if (typeof item === 'string') {
+                commentText = item;
+              } else if (typeof item === 'object' && item !== null) {
+                // breakdown内の各項目からコメントを抽出
+                const vals = Object.entries(item)
+                  .filter(([k]) => k !== 'score' && k !== 'rating')
+                  .map(([, v]) => typeof v === 'string' ? v : '')
+                  .filter(v => v.length > 0);
+                commentText = vals.join(' ') || breakdownKeys[i];
+              } else {
+                commentText = breakdownKeys[i];
+              }
+              details.push({
+                x: 200 + Math.random() * 400,
+                y: 150 + Math.random() * 300,
+                comment: commentText
+              });
+            }
+          } else if (Array.isArray(parsed.details)) {
+            details.push(...parsed.details);
+          }
 
           result = {
             score,
             overallComment: String(comment),
-            details: Array.isArray(parsed.details) ? parsed.details : []
+            details
           };
         }
 
