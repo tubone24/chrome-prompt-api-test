@@ -99,6 +99,59 @@ export const CalligraphyChecker = () => {
   const bristlesRef = useRef<Bristle[]>([]);
   // ストローク中のインク消費を追跡
   const strokeInkRef = useRef<number>(1.0);
+  // 筆圧対応デバイスかどうか（null=未検出、true=対応、false=非対応）
+  const hasPressureSupportRef = useRef<boolean | null>(null);
+  // 速度履歴（筆圧シミュレーション用、過去5フレーム分）
+  const velocityHistoryRef = useRef<number[]>([]);
+  // 生の筆圧値を収集（デバイス検出用）
+  const rawPressureValuesRef = useRef<number[]>([]);
+  // シミュレートされた筆圧（スムージング用）
+  const simulatedPressureRef = useRef<number>(0.5);
+
+  // 速度から筆圧をシミュレート（Mac trackpad等、筆圧非対応デバイス用）
+  // ゆっくり = 強い筆圧（太く濃い線）、速い = 軽い筆圧（細くカスレる線）
+  const simulatePressureFromVelocity = useCallback((velocity: number): number => {
+    // 速度を0-200程度の範囲で想定
+    // velocity 0-30: 強い筆圧 (0.7-0.9)
+    // velocity 30-80: 中程度 (0.4-0.7)
+    // velocity 80+: 軽い筆圧 (0.15-0.4)
+
+    let targetPressure: number;
+
+    if (velocity < 30) {
+      // ゆっくり = 強い筆圧
+      targetPressure = 0.7 + (1 - velocity / 30) * 0.2; // 0.7-0.9
+    } else if (velocity < 80) {
+      // 中速 = 中程度の筆圧
+      const t = (velocity - 30) / 50;
+      targetPressure = 0.7 - t * 0.3; // 0.7-0.4
+    } else {
+      // 速い = 軽い筆圧
+      const t = Math.min(1, (velocity - 80) / 120);
+      targetPressure = 0.4 - t * 0.25; // 0.4-0.15
+    }
+
+    // 速度履歴を使ってスムージング
+    velocityHistoryRef.current.push(velocity);
+    if (velocityHistoryRef.current.length > 5) {
+      velocityHistoryRef.current.shift();
+    }
+
+    // 速度履歴の平均で安定化
+    const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
+
+    // 急激な変化を防ぐため、現在の値と目標値を補間
+    const currentPressure = simulatedPressureRef.current;
+
+    // 速度変化が大きい場合（急停止や急加速）は少し反応を速く
+    const velocityChange = Math.abs(velocity - avgVelocity);
+    const responseFactor = Math.min(1, 0.3 + velocityChange * 0.01);
+    const finalPressure = currentPressure + (targetPressure - currentPressure) * responseFactor;
+
+    simulatedPressureRef.current = finalPressure;
+
+    return Math.max(0.1, Math.min(0.95, finalPressure));
+  }, []);
 
   // 毛を初期化 - 筆先の形状をシミュレート
   useEffect(() => {
@@ -367,8 +420,8 @@ export const CalligraphyChecker = () => {
     const bristles = bristlesRef.current;
     const steps = Math.max(2, Math.floor(distance * 1.5));
 
-    // 基本の筆の最大幅
-    const maxBrushWidth = 40;
+    // 基本の筆の最大幅（太めに設定）
+    const maxBrushWidth = 60;
 
     // インク消費（距離に応じて減少）
     const inkConsumption = distance * 0.001 * (1 + velocity * 0.002);
@@ -417,9 +470,9 @@ export const CalligraphyChecker = () => {
         const bx = x + Math.cos(perpAngle) * lateralPos;
         const by = y + Math.sin(perpAngle) * lateralPos;
 
-        // 毛の太さ（中心は太く、端は細い）
+        // 毛の太さ（中心は太く、端は細い）- 太めに設定
         const centerFactor = 1 - Math.abs(bristle.lateralOffset) * 0.5;
-        const bristleSize = bristle.thickness * (1.5 + pressure * 2) * centerFactor;
+        const bristleSize = bristle.thickness * (2.5 + pressure * 3) * centerFactor;
 
         // 墨の濃さ（中心は濃く、端は薄い）
         const inkAlpha = Math.min(0.95, bristleInk * (0.6 + centerFactor * 0.4));
@@ -479,7 +532,7 @@ export const CalligraphyChecker = () => {
     strokeInkRef.current = 1.0;
 
     const bristles = bristlesRef.current;
-    const entrySize = 15 * (0.6 + pressure * 0.6);
+    const entrySize = 22 * (0.6 + pressure * 0.6);
 
     // 入りの角度（筆が斜めに入る）
     const entryAngle = angle - Math.PI * 0.1;
@@ -493,10 +546,10 @@ export const CalligraphyChecker = () => {
       const perpAngle = entryAngle + Math.PI / 2;
       const lateralPos = bristle.lateralOffset * spread * entrySize;
 
-      const bx = x + Math.cos(perpAngle) * lateralPos + Math.cos(entryAngle) * bristle.distanceFromTip * 5;
-      const by = y + Math.sin(perpAngle) * lateralPos + Math.sin(entryAngle) * bristle.distanceFromTip * 5;
+      const bx = x + Math.cos(perpAngle) * lateralPos + Math.cos(entryAngle) * bristle.distanceFromTip * 8;
+      const by = y + Math.sin(perpAngle) * lateralPos + Math.sin(entryAngle) * bristle.distanceFromTip * 8;
 
-      const size = bristle.thickness * (2 + pressure * 2);
+      const size = bristle.thickness * (3 + pressure * 3);
       const alpha = 0.5 + pressure * 0.4;
 
       ctx.beginPath();
@@ -532,7 +585,7 @@ export const CalligraphyChecker = () => {
 
     if (isTome) {
       // 止め - 筆を押し付けて止める
-      const tomeSize = 12 * (0.5 + pressure * 0.5);
+      const tomeSize = 18 * (0.5 + pressure * 0.5);
 
       // 止めの墨だまり
       bristles.forEach((bristle) => {
@@ -544,7 +597,7 @@ export const CalligraphyChecker = () => {
 
         const bx = x + Math.cos(perpAngle) * lateralPos;
         const by = y + Math.sin(perpAngle) * lateralPos;
-        const size = bristle.thickness * (1.5 + pressure);
+        const size = bristle.thickness * (2.5 + pressure * 1.5);
         const alpha = strokeInk * 0.6;
 
         ctx.beginPath();
@@ -554,8 +607,8 @@ export const CalligraphyChecker = () => {
       });
     } else {
       // 払い/はね - 筆を持ち上げながら抜く
-      const haraiLength = isHane ? Math.min(50, velocity * 0.4) : Math.min(35, velocity * 0.3);
-      const steps = Math.max(10, Math.floor(haraiLength));
+      const haraiLength = isHane ? Math.min(60, velocity * 0.5) : Math.min(45, velocity * 0.4);
+      const steps = Math.max(12, Math.floor(haraiLength));
 
       // はねは上方向に曲がる
       const curveAmount = isHane ? 0.3 : 0;
@@ -565,7 +618,7 @@ export const CalligraphyChecker = () => {
 
         // 先細りの曲線（3次曲線的に）
         const widthDecay = Math.pow(1 - t, 2);
-        const currentWidth = 15 * widthDecay;
+        const currentWidth = 22 * widthDecay;
 
         // 進行方向（はねは曲がる）
         const currentAngle = angle - curveAmount * t * Math.PI;
@@ -588,7 +641,7 @@ export const CalligraphyChecker = () => {
           const bx = px + Math.cos(perpAngle) * lateralPos + (Math.random() - 0.5) * 2;
           const by = py + Math.sin(perpAngle) * lateralPos + (Math.random() - 0.5) * 2;
 
-          const size = bristle.thickness * (1 + widthDecay) * 0.8;
+          const size = bristle.thickness * (1.5 + widthDecay) * 1.2;
           const alpha = strokeInk * widthDecay * 0.6;
 
           ctx.beginPath();
@@ -607,9 +660,29 @@ export const CalligraphyChecker = () => {
     const pos = getCanvasCoordinates(e);
     if (!pos) return;
 
+    // ストローク開始時に速度履歴と筆圧値をリセット
+    velocityHistoryRef.current = [];
+    rawPressureValuesRef.current = [];
+    simulatedPressureRef.current = 0.6; // 初期筆圧（やや強め）
+
+    // 生の筆圧値を収集（デバイス検出用）
+    const rawPressure = e.pressure;
+    rawPressureValuesRef.current.push(rawPressure);
+
+    // 筆圧の初期値を決定
+    // ペン/タッチが0.5以外の値を返せば筆圧対応デバイス
+    let usePressure = pos.pressure;
+    if (rawPressure !== 0.5 && rawPressure > 0 && rawPressure < 1) {
+      hasPressureSupportRef.current = true;
+    }
+    // 非対応デバイスの場合、始点はやや強めの筆圧でシミュレート
+    if (hasPressureSupportRef.current === false) {
+      usePressure = 0.6;
+    }
+
     setIsDrawing(true);
     setLastPos({ x: pos.x, y: pos.y });
-    setLastPressure(pos.pressure);
+    setLastPressure(usePressure);
     setLastTime(Date.now());
     setLastAngle(0);
 
@@ -625,7 +698,7 @@ export const CalligraphyChecker = () => {
 
     // 初期角度（下向きをデフォルト）
     const initialAngle = Math.PI / 2;
-    drawEntryPoint(ctx, pos.x, pos.y, pos.pressure, initialAngle);
+    drawEntryPoint(ctx, pos.x, pos.y, usePressure, initialAngle);
   }, [getCanvasCoordinates, clearOverlay, drawEntryPoint]);
 
   const draw = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -649,13 +722,39 @@ export const CalligraphyChecker = () => {
     // 移動方向から角度を計算
     const angle = distance > 1 ? Math.atan2(dy, dx) : lastAngle;
 
-    drawBrushStroke(ctx, lastPos.x, lastPos.y, pos.x, pos.y, lastPressure, pos.pressure, velocity, angle);
+    // 生の筆圧値を収集してデバイス検出
+    const rawPressure = e.pressure;
+    rawPressureValuesRef.current.push(rawPressure);
+
+    // 数回のサンプリング後にデバイスを判定
+    if (hasPressureSupportRef.current === null && rawPressureValuesRef.current.length >= 5) {
+      // 全ての値が0.5（または0）なら筆圧非対応デバイス
+      const allSamePressure = rawPressureValuesRef.current.every(
+        p => p === 0.5 || p === 0
+      );
+      hasPressureSupportRef.current = !allSamePressure;
+      if (!hasPressureSupportRef.current) {
+        console.log('筆圧非対応デバイスを検出 - 速度ベースの筆圧シミュレーションを使用');
+      }
+    }
+
+    // 使用する筆圧を決定
+    let usePressure: number;
+    if (hasPressureSupportRef.current === false) {
+      // 筆圧非対応デバイス: 速度から筆圧をシミュレート
+      usePressure = simulatePressureFromVelocity(velocity);
+    } else {
+      // 筆圧対応デバイス: 実際の筆圧を使用
+      usePressure = pos.pressure;
+    }
+
+    drawBrushStroke(ctx, lastPos.x, lastPos.y, pos.x, pos.y, lastPressure, usePressure, velocity, angle);
 
     setLastPos({ x: pos.x, y: pos.y });
-    setLastPressure(pos.pressure);
+    setLastPressure(usePressure);
     setLastTime(currentTime);
     setLastAngle(angle);
-  }, [isDrawing, getCanvasCoordinates, lastPos, lastPressure, lastTime, lastAngle, drawBrushStroke]);
+  }, [isDrawing, getCanvasCoordinates, lastPos, lastPressure, lastTime, lastAngle, drawBrushStroke, simulatePressureFromVelocity]);
 
   const stopDrawing = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawing) return;
