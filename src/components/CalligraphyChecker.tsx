@@ -48,13 +48,14 @@ const GRADING_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          x: { type: 'integer', minimum: 0, maximum: 800 },
-          y: { type: 'integer', minimum: 0, maximum: 600 },
+          x: { type: 'integer', minimum: 100, maximum: 700, description: '問題箇所のx座標（左端100、右端700）' },
+          y: { type: 'integer', minimum: 80, maximum: 520, description: '問題箇所のy座標（上端80、下端520）' },
           comment: { type: 'string' }
         },
         required: ['x', 'y', 'comment']
       },
-      description: '指摘箇所の配列'
+      description: '指摘箇所の配列（最大3箇所）',
+      maxItems: 3
     }
   },
   required: ['score', 'overallComment', 'details']
@@ -209,7 +210,13 @@ export const CalligraphyChecker = () => {
 - 文字全体のバランスと形
 - お手本との比較
 
-指摘箇所のx,yは書かれた文字の問題がある位置を指定すること。`,
+【重要】座標について：
+- 画像は800x600ピクセル
+- 文字は画像の中央付近に書かれている
+- detailsの座標(x,y)は、指摘したい筆画の中心位置をピクセル単位で指定
+- 画像の左上が(0,0)、右下が(800,600)
+- 文字が書かれている領域は大体x:150-650、y:100-500の範囲
+- 指摘箇所は最大3つまで、最も重要な問題点のみ指摘すること`,
     multimodal: true,
     temperature: 0.5,
     responseConstraint: GRADING_SCHEMA,
@@ -820,7 +827,9 @@ export const CalligraphyChecker = () => {
     setMarkerAnimationIndex(0);
     clearOverlay();
 
-    const prompt = `この習字を採点してください。お手本の文字は「${selectedChar.char}」（${selectedChar.reading}）です。${selectedChar.description}の練習として書かれています。JSON形式のみで回答してください。`;
+    const prompt = `この習字を採点してください。お手本の文字は「${selectedChar.char}」（${selectedChar.reading}）です。${selectedChar.description}の練習として書かれています。
+
+detailsで指摘する座標は、問題のある筆画の中心をピクセル座標で正確に指定してください。画像は800x600で、文字は中央付近（x:150-650、y:100-500）にあります。`;
 
     try {
       await sendMessage(prompt, canvas);
