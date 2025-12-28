@@ -580,7 +580,7 @@ export const CalligraphyChecker = () => {
           // 代替フォーマット（assessment/evaluation構造）
           const assessment = parsed.assessment || parsed.evaluation;
 
-          // スコアを探す（様々なキー名に対応）
+          // スコアを探す（様々なキー名に対応、トップレベルも確認）
           let score = 0;
           if (assessment.score !== undefined) {
             score = Number(assessment.score);
@@ -589,6 +589,13 @@ export const CalligraphyChecker = () => {
             }
           } else if (assessment.overall_score !== undefined) {
             score = Math.round(Number(assessment.overall_score) * 10);
+          } else if (parsed.total_score !== undefined) {
+            // トップレベルのtotal_scoreをチェック
+            score = Number(parsed.total_score);
+            if (score <= 10) score = Math.round(score * 10);
+          } else if (parsed.overall_score !== undefined) {
+            score = Number(parsed.overall_score);
+            if (score <= 10) score = Math.round(score * 10);
           }
 
           // コメントを構築（様々なフォーマットに対応）
@@ -605,6 +612,11 @@ export const CalligraphyChecker = () => {
             comment = assessment.feedback;
           } else if (typeof assessment.notes === 'string') {
             comment = assessment.notes;
+          }
+
+          // notesが別途ある場合は追加（overall_impressionと別にnotesがある場合）
+          if (comment && typeof assessment.notes === 'string' && assessment.notes !== comment) {
+            comment = comment + '\n\n' + assessment.notes;
           }
 
           // detailed_feedback がオブジェクトの場合、各フィードバックを結合
@@ -669,11 +681,28 @@ export const CalligraphyChecker = () => {
           // detailsがない場合、ランダムな位置に赤丸を生成（指摘がある場合）
           const details: FeedbackDetail[] = [];
 
+          // strokes配列がある場合（各筆画のフィードバック）
+          if (Array.isArray(assessment.strokes) && assessment.strokes.length > 0) {
+            const numMarkers = Math.min(3, assessment.strokes.length);
+            for (let i = 0; i < numMarkers; i++) {
+              const stroke = assessment.strokes[i];
+              const strokeName = stroke.stroke_name || stroke.name || `筆画${i + 1}`;
+              const strokeComment = stroke.comment || stroke.feedback || '';
+              details.push({
+                x: 200 + Math.random() * 400,
+                y: 150 + Math.random() * 300,
+                comment: `【${strokeName}】${strokeComment}`
+              });
+            }
+          }
+
           // detailed_feedback, specific_comments など様々なフィードバック構造に対応
-          const feedbackSource = assessment.detailed_feedback
+          const feedbackSource = !details.length ? (
+            assessment.detailed_feedback
             || assessment.specific_comments
             || assessment.feedback_items
-            || assessment.points;
+            || assessment.points
+          ) : null;
 
           if (feedbackSource && typeof feedbackSource === 'object') {
             const feedbackKeys = Object.keys(feedbackSource);
