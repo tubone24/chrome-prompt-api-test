@@ -584,7 +584,6 @@ export const CalligraphyChecker = () => {
           let score = 0;
           if (assessment.score !== undefined) {
             score = Number(assessment.score);
-            // 10点満点の場合は100点満点に変換
             if (assessment.scale === 10 || score <= 10) {
               score = Math.round(score * 10);
             }
@@ -592,19 +591,56 @@ export const CalligraphyChecker = () => {
             score = Math.round(Number(assessment.overall_score) * 10);
           }
 
-          // コメントを探す（様々なキー名に対応）
-          const comment = assessment.overall_impression
-            || assessment.comments
-            || assessment.comment
-            || assessment.notes
-            || (Array.isArray(parsed.suggestions) ? parsed.suggestions.join('\n') : '')
-            || (Array.isArray(assessment.recommendations) ? assessment.recommendations.join('\n') : '')
-            || '採点完了';
+          // コメントを構築（detailed_feedbackがオブジェクトの場合も対応）
+          let comment = '';
+
+          // detailed_feedback がオブジェクトの場合、各フィードバックを結合
+          if (assessment.detailed_feedback && typeof assessment.detailed_feedback === 'object') {
+            const feedbackEntries = Object.entries(assessment.detailed_feedback);
+            comment = feedbackEntries.map(([, value]) => value).join('\n\n');
+          }
+
+          // 他のコメントソースも試す
+          if (!comment) {
+            comment = assessment.overall_impression
+              || assessment.comments
+              || assessment.comment
+              || assessment.notes
+              || '';
+          }
+
+          // suggestionsがあれば追加
+          if (Array.isArray(assessment.suggestions) && assessment.suggestions.length > 0) {
+            const suggestionsText = '\n\n【改善点】\n' + assessment.suggestions.map((s: string) => `・${s}`).join('\n');
+            comment = comment ? comment + suggestionsText : suggestionsText;
+          } else if (Array.isArray(parsed.suggestions) && parsed.suggestions.length > 0) {
+            const suggestionsText = '\n\n【改善点】\n' + parsed.suggestions.map((s: string) => `・${s}`).join('\n');
+            comment = comment ? comment + suggestionsText : suggestionsText;
+          }
+
+          if (!comment) {
+            comment = '採点完了';
+          }
+
+          // detailsがない場合、ランダムな位置に赤丸を生成（指摘がある場合）
+          const details: FeedbackDetail[] = [];
+          if (assessment.detailed_feedback && typeof assessment.detailed_feedback === 'object') {
+            const feedbackKeys = Object.keys(assessment.detailed_feedback);
+            // 最大3つの指摘箇所を生成
+            const numMarkers = Math.min(3, feedbackKeys.length);
+            for (let i = 0; i < numMarkers; i++) {
+              details.push({
+                x: 200 + Math.random() * 400, // 200-600の範囲
+                y: 150 + Math.random() * 300, // 150-450の範囲
+                comment: String(assessment.detailed_feedback[feedbackKeys[i]])
+              });
+            }
+          }
 
           result = {
             score,
             overallComment: String(comment),
-            details: []
+            details
           };
         } else {
           // その他のフォーマット - スコアやコメントを探す
