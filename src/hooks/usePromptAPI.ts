@@ -18,6 +18,7 @@ interface UsePromptAPIOptions {
   temperature?: number;
   topK?: number;
   multimodal?: boolean;
+  responseConstraint?: Record<string, unknown>; // JSON Schema for structured output
 }
 
 export function usePromptAPI(options: UsePromptAPIOptions = {}) {
@@ -163,9 +164,16 @@ export function usePromptAPI(options: UsePromptAPIOptions = {}) {
         promptInput = content;
       }
 
-      const stream = session.promptStreaming(promptInput, {
+      const promptOptions: { signal: AbortSignal; responseConstraint?: Record<string, unknown> } = {
         signal: abortControllerRef.current.signal,
-      });
+      };
+
+      // 構造化出力のためのJSONスキーマを設定
+      if (options.responseConstraint) {
+        promptOptions.responseConstraint = options.responseConstraint;
+      }
+
+      const stream = session.promptStreaming(promptInput, promptOptions);
 
       // chunkが差分の場合は累積、累積テキストの場合はそのまま使用
       let accumulatedText = '';
