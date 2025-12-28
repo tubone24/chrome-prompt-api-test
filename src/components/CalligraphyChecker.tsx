@@ -579,10 +579,27 @@ export const CalligraphyChecker = () => {
         } else if (parsed.assessment) {
           // 代替フォーマット（assessment構造）
           const assessment = parsed.assessment;
-          const score = assessment.overall_score !== undefined
-            ? Math.round(Number(assessment.overall_score) * 10) // 10点満点を100点に変換
-            : 0;
-          const comment = assessment.comments || assessment.comment || JSON.stringify(parsed.suggestions || []);
+
+          // スコアを探す（様々なキー名に対応）
+          let score = 0;
+          if (assessment.score !== undefined) {
+            score = Number(assessment.score);
+            // 10点満点の場合は100点満点に変換
+            if (assessment.scale === 10 || score <= 10) {
+              score = Math.round(score * 10);
+            }
+          } else if (assessment.overall_score !== undefined) {
+            score = Math.round(Number(assessment.overall_score) * 10);
+          }
+
+          // コメントを探す（様々なキー名に対応）
+          const comment = assessment.overall_impression
+            || assessment.comments
+            || assessment.comment
+            || assessment.notes
+            || (Array.isArray(parsed.suggestions) ? parsed.suggestions.join('\n') : '')
+            || (Array.isArray(assessment.recommendations) ? assessment.recommendations.join('\n') : '')
+            || '採点完了';
 
           result = {
             score,
@@ -590,11 +607,27 @@ export const CalligraphyChecker = () => {
             details: []
           };
         } else {
-          // その他のフォーマット - とりあえず表示
+          // その他のフォーマット - スコアやコメントを探す
+          let score = 0;
+          let comment = '';
+
+          // トップレベルでスコアを探す
+          if (parsed.score !== undefined) {
+            score = Number(parsed.score);
+            if (score <= 10) score = Math.round(score * 10);
+          }
+
+          // コメントを探す
+          comment = parsed.overallComment
+            || parsed.comment
+            || parsed.comments
+            || parsed.feedback
+            || JSON.stringify(parsed, null, 2);
+
           result = {
-            score: 0,
-            overallComment: JSON.stringify(parsed, null, 2),
-            details: []
+            score,
+            overallComment: String(comment),
+            details: Array.isArray(parsed.details) ? parsed.details : []
           };
         }
 
