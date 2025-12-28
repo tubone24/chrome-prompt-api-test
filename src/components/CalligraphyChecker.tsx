@@ -81,37 +81,17 @@ export const CalligraphyChecker = () => {
     sendMessage,
     stopGeneration,
   } = usePromptAPI({
-    systemPrompt: `あなたは書道の先生です。生徒が書いた習字を見て採点・指導してください。
-お手本の文字と比較して、以下の観点で評価してください：
-- 止め・はね・払いの正確さ
-- 線の太さの変化（筆圧の表現）
-- 文字のバランス
-- お手本との類似度
+    systemPrompt: `あなたは厳しくも優しい書道の先生だ。生徒の習字を採点する。
+タメ語で指導すること。
 
-必ず以下のJSON形式のみで回答してください。JSON以外のテキストは含めないでください：
-{
-  "score": 0から100の点数,
-  "overallComment": "全体的なコメント（タメ語で厳しくも優しい先生口調で）",
-  "details": [
-    {
-      "x": 指摘箇所のx座標（0-800の数値）,
-      "y": 指摘箇所のy座標（0-600の数値）,
-      "comment": "その箇所への具体的な指摘（タメ語で）"
-    }
-  ]
-}
+【重要】以下の正確なJSON形式のみで回答せよ。マークダウンや説明文は不要：
+{"score":75,"overallComment":"コメント","details":[{"x":400,"y":300,"comment":"指摘"}]}
 
-例：
-{
-  "score": 72,
-  "overallComment": "なかなかいい感じだな！でもまだ改善の余地があるぞ。特に払いの部分をもっと意識してみよう。",
-  "details": [
-    {"x": 400, "y": 200, "comment": "ここの止めが甘いな。筆をしっかり止めてから離すんだ。"},
-    {"x": 350, "y": 450, "comment": "払いがちょっと弱いぞ。もっと勢いよく！"}
-  ]
-}`,
+- score: 0〜100の整数
+- overallComment: タメ語での総評
+- details: 指摘箇所の配列（x:0-800, y:0-600）`,
     multimodal: true,
-    temperature: 0.7,
+    temperature: 0.5,
   });
 
   useEffect(() => {
@@ -583,21 +563,46 @@ export const CalligraphyChecker = () => {
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         console.log('JSON found:', jsonMatch[0]);
-        const parsed = JSON.parse(jsonMatch[0]) as GradingResult;
+        const parsed = JSON.parse(jsonMatch[0]);
         console.log('Parsed result:', parsed);
 
-        // detailsが配列でない場合は空配列にする
-        if (!Array.isArray(parsed.details)) {
-          parsed.details = [];
+        // 異なるフォーマットに対応
+        let result: GradingResult;
+
+        if (parsed.score !== undefined && parsed.overallComment !== undefined) {
+          // 期待通りのフォーマット
+          result = {
+            score: Number(parsed.score),
+            overallComment: String(parsed.overallComment),
+            details: Array.isArray(parsed.details) ? parsed.details : []
+          };
+        } else if (parsed.assessment) {
+          // 代替フォーマット（assessment構造）
+          const assessment = parsed.assessment;
+          const score = assessment.overall_score !== undefined
+            ? Math.round(Number(assessment.overall_score) * 10) // 10点満点を100点に変換
+            : 0;
+          const comment = assessment.comments || assessment.comment || JSON.stringify(parsed.suggestions || []);
+
+          result = {
+            score,
+            overallComment: String(comment),
+            details: []
+          };
+        } else {
+          // その他のフォーマット - とりあえず表示
+          result = {
+            score: 0,
+            overallComment: JSON.stringify(parsed, null, 2),
+            details: []
+          };
         }
 
-        if (parsed.score !== undefined && parsed.overallComment) {
-          console.log('Setting grading result');
-          setGradingResult(parsed);
-          if (parsed.details.length > 0) {
-            setShowMarkers(true);
-            setMarkerAnimationIndex(0);
-          }
+        console.log('Final grading result:', result);
+        setGradingResult(result);
+        if (result.details.length > 0) {
+          setShowMarkers(true);
+          setMarkerAnimationIndex(0);
         }
       } else {
         console.log('No JSON found in response');
