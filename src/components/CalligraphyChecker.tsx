@@ -48,8 +48,8 @@ const GRADING_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          x: { type: 'integer', minimum: 200, maximum: 600, description: '問題箇所のx座標' },
-          y: { type: 'integer', minimum: 150, maximum: 450, description: '問題箇所のy座標' },
+          x: { type: 'integer', minimum: 150, maximum: 650, description: '問題箇所のx座標' },
+          y: { type: 'integer', minimum: 100, maximum: 500, description: '問題箇所のy座標' },
           comment: { type: 'string' }
         },
         required: ['x', 'y', 'comment']
@@ -224,7 +224,7 @@ export const CalligraphyChecker = () => {
 - 文字全体のバランスと形
 - お手本との比較
 
-座標について：画像は800x600。文字は中央付近（x:200-600, y:150-450）に書かれている。
+座標について：画像は800x600。文字は中央付近（x:150-650, y:100-500）に書かれている。
 指摘箇所のx,yは問題のある筆画の位置を指定。指摘は最大3箇所。`,
     multimodal: true,
     temperature: 0.5,
