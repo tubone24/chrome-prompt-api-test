@@ -6,7 +6,6 @@ import { usePromptAPI } from '../hooks/usePromptAPI';
 interface FeedbackDetail {
   x: number;
   y: number;
-  gridPosition?: number;
   comment: string;
 }
 
@@ -31,13 +30,6 @@ const SAMPLE_CHARACTERS = [
 ];
 
 // 構造化出力のためのJSONスキーマ
-// グリッドベースの位置指定（5x5=25マス）
-// グリッド番号:
-//  1  2  3  4  5
-//  6  7  8  9 10
-// 11 12 13 14 15
-// 16 17 18 19 20
-// 21 22 23 24 25
 const GRADING_SCHEMA = {
   type: 'object',
   properties: {
@@ -56,15 +48,11 @@ const GRADING_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          gridPosition: {
-            type: 'integer',
-            minimum: 1,
-            maximum: 25,
-            description: '問題箇所のグリッド位置（1-25）。画像を5x5に分割した場合の位置番号。1=左上、5=右上、21=左下、25=右下、13=中央'
-          },
+          x: { type: 'integer', minimum: 200, maximum: 600, description: '問題箇所のx座標' },
+          y: { type: 'integer', minimum: 150, maximum: 450, description: '問題箇所のy座標' },
           comment: { type: 'string' }
         },
-        required: ['gridPosition', 'comment']
+        required: ['x', 'y', 'comment']
       },
       description: '指摘箇所の配列（最大3箇所）',
       maxItems: 3
@@ -73,30 +61,18 @@ const GRADING_SCHEMA = {
   required: ['score', 'overallComment', 'details']
 };
 
-// グリッド番号からキャンバス座標に変換
-const gridToCoordinates = (gridPosition: number): { x: number; y: number } => {
-  // グリッドは1-25の番号
-  // 1  2  3  4  5
-  // 6  7  8  9 10
-  // ...
-  const col = (gridPosition - 1) % 5; // 0-4
-  const row = Math.floor((gridPosition - 1) / 5); // 0-4
+// 座標を中央寄りに補正する関数
+const adjustCoordinatesToCenter = (x: number, y: number): { x: number; y: number } => {
+  // キャンバス中央
+  const centerX = 400;
+  const centerY = 300;
 
-  // キャンバスは800x600、余白を少し取って全体をカバー
-  // 余白40pxを取り、720x520の領域を5x5に分割
-  const startX = 40;
-  const endX = 760;
-  const startY = 40;
-  const endY = 560;
+  // 座標を中央に向かって引き寄せる（50%補正）
+  const pullFactor = 0.5;
+  const adjustedX = x + (centerX - x) * pullFactor;
+  const adjustedY = y + (centerY - y) * pullFactor;
 
-  const cellWidth = (endX - startX) / 5;
-  const cellHeight = (endY - startY) / 5;
-
-  // セルの中央座標を返す
-  const x = startX + cellWidth * (col + 0.5);
-  const y = startY + cellHeight * (row + 0.5);
-
-  return { x, y };
+  return { x: adjustedX, y: adjustedY };
 };
 
 // 毛筆の毛（bristle）を表現する構造
@@ -248,17 +224,8 @@ export const CalligraphyChecker = () => {
 - 文字全体のバランスと形
 - お手本との比較
 
-【位置指定】
-画像全体を5x5のグリッド（25マス）で考える：
- 1  2  3  4  5  (上段)
- 6  7  8  9 10
-11 12 13 14 15  (中段)
-16 17 18 19 20
-21 22 23 24 25  (下段)
-
-文字の問題箇所をグリッド番号で指定する。
-文字は通常、画像の中央（グリッド7,8,9,12,13,14,17,18,19あたり）に書かれている。
-指摘は最大3箇所まで。`,
+座標について：画像は800x600。文字は中央付近（x:200-600, y:150-450）に書かれている。
+指摘箇所のx,yは問題のある筆画の位置を指定。指摘は最大3箇所。`,
     multimodal: true,
     temperature: 0.5,
     responseConstraint: GRADING_SCHEMA,
@@ -869,9 +836,7 @@ export const CalligraphyChecker = () => {
     setMarkerAnimationIndex(0);
     clearOverlay();
 
-    const prompt = `この習字を採点してください。お手本の文字は「${selectedChar.char}」（${selectedChar.reading}）です。${selectedChar.description}の練習として書かれています。
-
-detailsで指摘する位置は、5x5グリッドの番号（1-25）で指定してください。文字のどの部分に問題があるかをグリッド番号で示してください。`;
+    const prompt = `この習字を採点してください。お手本の文字は「${selectedChar.char}」（${selectedChar.reading}）です。${selectedChar.description}の練習として書かれています。`;
 
     try {
       await sendMessage(prompt, canvas);
@@ -904,24 +869,16 @@ detailsで指摘する位置は、5x5グリッドの番号（1-25）で指定し
 
         if (parsed.score !== undefined && parsed.overallComment !== undefined) {
           // 期待通りのフォーマット
-          // gridPositionをx/y座標に変換
+          // 座標を中央寄りに補正
           const details: FeedbackDetail[] = [];
           if (Array.isArray(parsed.details)) {
-            parsed.details.forEach((detail: { gridPosition?: number; x?: number; y?: number; comment?: string }) => {
-              if (detail.gridPosition !== undefined) {
-                // グリッド番号から座標に変換
-                const coords = gridToCoordinates(detail.gridPosition);
+            parsed.details.forEach((detail: { x?: number; y?: number; comment?: string }) => {
+              if (detail.x !== undefined && detail.y !== undefined) {
+                // 座標を中央に向かって補正
+                const adjusted = adjustCoordinatesToCenter(Number(detail.x), Number(detail.y));
                 details.push({
-                  x: coords.x,
-                  y: coords.y,
-                  gridPosition: detail.gridPosition,
-                  comment: String(detail.comment || '')
-                });
-              } else if (detail.x !== undefined && detail.y !== undefined) {
-                // 旧形式（x/y座標）もサポート
-                details.push({
-                  x: Number(detail.x),
-                  y: Number(detail.y),
+                  x: adjusted.x,
+                  y: adjusted.y,
                   comment: String(detail.comment || '')
                 });
               }
@@ -1399,30 +1356,16 @@ detailsで指摘する位置は、5x5グリッドの番号（1-25）で指定し
                           <span className="text-red-500">⭕</span>
                           指摘箇所
                         </div>
-                        {gradingResult.details.map((detail, index) => {
-                          // グリッド位置から位置名を生成
-                          const getPositionName = (gridPos?: number) => {
-                            if (!gridPos) return '';
-                            const row = Math.floor((gridPos - 1) / 5);
-                            const col = (gridPos - 1) % 5;
-                            const rowNames = ['上部', '上寄り', '中央', '下寄り', '下部'];
-                            const colNames = ['左', '左寄り', '中央', '右寄り', '右'];
-                            return `${rowNames[row]}${colNames[col]}`;
-                          };
-                          return (
-                            <div
-                              key={index}
-                              className="bg-[hsl(var(--background))] rounded-lg p-3 border-l-4 border-red-500"
-                            >
-                              <div className="text-xs text-[hsl(var(--muted-foreground))] mb-1">
-                                位置: {detail.gridPosition ? getPositionName(detail.gridPosition) : `(${Math.round(detail.x)}, ${Math.round(detail.y)})`}
-                              </div>
-                              <p className="text-sm text-[hsl(var(--foreground))]">
-                                {detail.comment}
-                              </p>
-                            </div>
-                          );
-                        })}
+                        {gradingResult.details.map((detail, index) => (
+                          <div
+                            key={index}
+                            className="bg-[hsl(var(--background))] rounded-lg p-3 border-l-4 border-red-500"
+                          >
+                            <p className="text-sm text-[hsl(var(--foreground))]">
+                              {detail.comment}
+                            </p>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
