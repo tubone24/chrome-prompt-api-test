@@ -1,0 +1,745 @@
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Pen, Eraser, Trash2, ChevronDown, Send, RefreshCw } from 'lucide-react';
+import { usePromptAPI } from '../hooks/usePromptAPI';
+
+// 採点結果のJSON構造
+interface FeedbackDetail {
+  x: number;
+  y: number;
+  comment: string;
+}
+
+interface GradingResult {
+  score: number;
+  overallComment: string;
+  details: FeedbackDetail[];
+}
+
+// お手本文字の選択肢
+const SAMPLE_CHARACTERS = [
+  { char: '永', reading: 'えい', description: '永字八法 - 基本の8種類の筆法が含まれる' },
+  { char: '山', reading: 'やま', description: '横画と縦画のバランス' },
+  { char: '川', reading: 'かわ', description: '縦画の払い' },
+  { char: '日', reading: 'ひ', description: '四角の構成' },
+  { char: '月', reading: 'つき', description: '曲線と払い' },
+  { char: '火', reading: 'ひ', description: 'はねと払い' },
+  { char: '水', reading: 'みず', description: '複雑な払い' },
+  { char: '木', reading: 'き', description: '横画・縦画・払い' },
+  { char: '花', reading: 'はな', description: '複雑な構成' },
+  { char: '心', reading: 'こころ', description: '点と曲線' },
+];
+
+type Tool = 'brush' | 'eraser';
+
+export const CalligraphyChecker = () => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [tool, setTool] = useState<Tool>('brush');
+  const [lastPos, setLastPos] = useState<{ x: number; y: number } | null>(null);
+  const [lastPressure, setLastPressure] = useState(0.5);
+  const [lastTime, setLastTime] = useState(0);
+  const [showScrollIndicator, setShowScrollIndicator] = useState(false);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+  const [selectedChar, setSelectedChar] = useState(SAMPLE_CHARACTERS[0]);
+  const [gradingResult, setGradingResult] = useState<GradingResult | null>(null);
+  const [showMarkers, setShowMarkers] = useState(false);
+  const [markerAnimationIndex, setMarkerAnimationIndex] = useState(0);
+
+  const {
+    messages,
+    status,
+    isGenerating,
+    downloadProgress,
+    error: apiError,
+    checkAvailability,
+    sendMessage,
+    stopGeneration,
+  } = usePromptAPI({
+    systemPrompt: `あなたは書道の先生です。生徒が書いた習字を見て採点・指導してください。
+お手本の文字と比較して、以下の観点で評価してください：
+- 止め・はね・払いの正確さ
+- 線の太さの変化（筆圧の表現）
+- 文字のバランス
+- お手本との類似度
+
+必ず以下のJSON形式のみで回答してください。JSON以外のテキストは含めないでください：
+{
+  "score": 0から100の点数,
+  "overallComment": "全体的なコメント（タメ語で厳しくも優しい先生口調で）",
+  "details": [
+    {
+      "x": 指摘箇所のx座標（0-800の数値）,
+      "y": 指摘箇所のy座標（0-600の数値）,
+      "comment": "その箇所への具体的な指摘（タメ語で）"
+    }
+  ]
+}
+
+例：
+{
+  "score": 72,
+  "overallComment": "なかなかいい感じだな！でもまだ改善の余地があるぞ。特に払いの部分をもっと意識してみよう。",
+  "details": [
+    {"x": 400, "y": 200, "comment": "ここの止めが甘いな。筆をしっかり止めてから離すんだ。"},
+    {"x": 350, "y": 450, "comment": "払いがちょっと弱いぞ。もっと勢いよく！"}
+  ]
+}`,
+    multimodal: true,
+    temperature: 0.7,
+  });
+
+  useEffect(() => {
+    checkAvailability();
+  }, [checkAvailability]);
+
+  // 半紙テクスチャを描画
+  const drawHanshiTexture = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    // ベースのクリーム色
+    ctx.fillStyle = '#FAF6F0';
+    ctx.fillRect(0, 0, width, height);
+
+    // 紙の繊維感を表現（ノイズ）
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const noise = (Math.random() - 0.5) * 15;
+      data[i] = Math.min(255, Math.max(0, data[i] + noise));
+      data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + noise));
+      data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + noise));
+    }
+    ctx.putImageData(imageData, 0, 0);
+
+    // 薄い罫線（補助線）
+    ctx.strokeStyle = 'rgba(200, 180, 160, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+
+    // 中心の十字線
+    ctx.beginPath();
+    ctx.moveTo(width / 2, 50);
+    ctx.lineTo(width / 2, height - 50);
+    ctx.moveTo(50, height / 2);
+    ctx.lineTo(width - 50, height / 2);
+    ctx.stroke();
+
+    // 外枠
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(180, 160, 140, 0.5)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(40, 40, width - 80, height - 80);
+
+    ctx.setLineDash([]);
+  }, []);
+
+  // キャンバス初期化
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    drawHanshiTexture(ctx, canvas.width, canvas.height);
+  }, [drawHanshiTexture]);
+
+  // オーバーレイキャンバスをクリア
+  const clearOverlay = useCallback(() => {
+    const overlay = overlayCanvasRef.current;
+    if (!overlay) return;
+    const ctx = overlay.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+  }, []);
+
+  // 赤丸マーカーを描画
+  const drawMarkers = useCallback((details: FeedbackDetail[], animateIndex: number) => {
+    const overlay = overlayCanvasRef.current;
+    if (!overlay) return;
+    const ctx = overlay.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    details.forEach((detail, index) => {
+      if (index > animateIndex) return;
+
+      const progress = index === animateIndex ? 1 : 1;
+      const radius = 25 * progress;
+
+      // 赤丸（筆風）
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(detail.x, detail.y, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(200, 30, 30, 0.8)';
+      ctx.lineWidth = 4;
+
+      // 筆風の不規則な線
+      ctx.setLineDash([]);
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        const offsetRadius = radius + (Math.random() - 0.5) * 4;
+        ctx.arc(
+          detail.x + (Math.random() - 0.5) * 2,
+          detail.y + (Math.random() - 0.5) * 2,
+          offsetRadius,
+          0,
+          Math.PI * 2
+        );
+        ctx.globalAlpha = 0.3 + Math.random() * 0.4;
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+  }, []);
+
+  // マーカーアニメーション
+  useEffect(() => {
+    if (!showMarkers || !gradingResult?.details.length) return;
+
+    if (markerAnimationIndex < gradingResult.details.length) {
+      const timer = setTimeout(() => {
+        drawMarkers(gradingResult.details, markerAnimationIndex);
+        setMarkerAnimationIndex(prev => prev + 1);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [showMarkers, markerAnimationIndex, gradingResult, drawMarkers]);
+
+  // Auto-scroll
+  useEffect(() => {
+    if (shouldAutoScroll && messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, shouldAutoScroll, gradingResult]);
+
+  // Scroll indicator
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 50;
+      setShowScrollIndicator(!isNearBottom);
+      setShouldAutoScroll(isNearBottom);
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    handleScroll();
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setShouldAutoScroll(true);
+  }, []);
+
+  const getCanvasCoordinates = useCallback((
+    e: React.PointerEvent<HTMLCanvasElement>
+  ): { x: number; y: number; pressure: number } | null => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY,
+      pressure: e.pressure > 0 ? e.pressure : 0.5,
+    };
+  }, []);
+
+  // 筆のストロークを描画（カスレ、止め・はね・払い表現）
+  const drawBrushStroke = useCallback((
+    ctx: CanvasRenderingContext2D,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    fromPressure: number,
+    toPressure: number,
+    velocity: number
+  ) => {
+    const distance = Math.sqrt((toX - fromX) ** 2 + (toY - fromY) ** 2);
+    const steps = Math.max(1, Math.floor(distance / 2));
+
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const x = fromX + (toX - fromX) * t;
+      const y = fromY + (toY - fromY) * t;
+      const pressure = fromPressure + (toPressure - fromPressure) * t;
+
+      // 筆圧と速度に基づく線の太さ
+      const baseWidth = 15;
+      const pressureWidth = baseWidth * (0.3 + pressure * 0.7);
+      const velocityFactor = Math.max(0.5, 1 - velocity * 0.001);
+      const width = pressureWidth * velocityFactor;
+
+      // カスレ効果（速度が速いほどカスレる）
+      const kasureIntensity = Math.min(1, velocity * 0.003);
+      const numStrokes = 5 + Math.floor(kasureIntensity * 3);
+
+      for (let j = 0; j < numStrokes; j++) {
+        const offsetX = (Math.random() - 0.5) * width * 0.6;
+        const offsetY = (Math.random() - 0.5) * width * 0.6;
+        const strokeWidth = width * (0.2 + Math.random() * 0.3);
+
+        // カスレによる透明度変化
+        const alpha = 0.6 + Math.random() * 0.3 - kasureIntensity * 0.3;
+
+        ctx.beginPath();
+        ctx.arc(x + offsetX, y + offsetY, strokeWidth / 2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(20, 20, 30, ${Math.max(0.1, alpha)})`;
+        ctx.fill();
+      }
+
+      // 墨のにじみ効果（筆圧が強いところ）
+      if (pressure > 0.6 && Math.random() > 0.8) {
+        ctx.beginPath();
+        ctx.arc(x, y, width * 0.8, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(20, 20, 30, 0.05)';
+        ctx.fill();
+      }
+    }
+  }, []);
+
+  const startDrawing = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const pos = getCanvasCoordinates(e);
+    if (!pos) return;
+
+    setIsDrawing(true);
+    setLastPos({ x: pos.x, y: pos.y });
+    setLastPressure(pos.pressure);
+    setLastTime(Date.now());
+
+    // 採点結果をクリア
+    setGradingResult(null);
+    setShowMarkers(false);
+    setMarkerAnimationIndex(0);
+    clearOverlay();
+
+    // 始点に点を打つ（止めの表現）
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+
+    if (tool === 'brush') {
+      const dotSize = 8 * pos.pressure;
+      for (let i = 0; i < 5; i++) {
+        ctx.beginPath();
+        ctx.arc(
+          pos.x + (Math.random() - 0.5) * dotSize * 0.5,
+          pos.y + (Math.random() - 0.5) * dotSize * 0.5,
+          dotSize * (0.3 + Math.random() * 0.4),
+          0,
+          Math.PI * 2
+        );
+        ctx.fillStyle = `rgba(20, 20, 30, ${0.5 + Math.random() * 0.3})`;
+        ctx.fill();
+      }
+    }
+  }, [getCanvasCoordinates, tool, clearOverlay]);
+
+  const draw = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawing) return;
+    e.preventDefault();
+
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+
+    const pos = getCanvasCoordinates(e);
+    if (!pos || !lastPos) return;
+
+    const currentTime = Date.now();
+    const timeDelta = currentTime - lastTime;
+    const distance = Math.sqrt((pos.x - lastPos.x) ** 2 + (pos.y - lastPos.y) ** 2);
+    const velocity = timeDelta > 0 ? distance / timeDelta * 10 : 0;
+
+    if (tool === 'brush') {
+      drawBrushStroke(ctx, lastPos.x, lastPos.y, pos.x, pos.y, lastPressure, pos.pressure, velocity);
+    } else if (tool === 'eraser') {
+      ctx.beginPath();
+      ctx.moveTo(lastPos.x, lastPos.y);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.strokeStyle = '#FAF6F0';
+      ctx.lineWidth = 30;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+    }
+
+    setLastPos({ x: pos.x, y: pos.y });
+    setLastPressure(pos.pressure);
+    setLastTime(currentTime);
+  }, [isDrawing, getCanvasCoordinates, lastPos, lastPressure, lastTime, tool, drawBrushStroke]);
+
+  const stopDrawing = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawing) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx || !lastPos) {
+      setIsDrawing(false);
+      setLastPos(null);
+      return;
+    }
+
+    // 終点の表現（はね・払い）
+    if (tool === 'brush') {
+      const pos = getCanvasCoordinates(e);
+      if (pos) {
+        // 払いの先細り効果
+        const endX = lastPos.x + (pos.x - lastPos.x) * 0.5;
+        const endY = lastPos.y + (pos.y - lastPos.y) * 0.5;
+
+        for (let i = 0; i < 3; i++) {
+          const t = i / 3;
+          const size = 4 * (1 - t);
+          ctx.beginPath();
+          ctx.arc(
+            lastPos.x + (endX - lastPos.x) * t + (Math.random() - 0.5) * 2,
+            lastPos.y + (endY - lastPos.y) * t + (Math.random() - 0.5) * 2,
+            size,
+            0,
+            Math.PI * 2
+          );
+          ctx.fillStyle = `rgba(20, 20, 30, ${0.3 * (1 - t)})`;
+          ctx.fill();
+        }
+      }
+    }
+
+    setIsDrawing(false);
+    setLastPos(null);
+  }, [isDrawing, lastPos, tool, getCanvasCoordinates]);
+
+  const clearCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    drawHanshiTexture(ctx, canvas.width, canvas.height);
+    setGradingResult(null);
+    setShowMarkers(false);
+    setMarkerAnimationIndex(0);
+    clearOverlay();
+  }, [drawHanshiTexture, clearOverlay]);
+
+  // 採点を実行
+  const handleGrading = useCallback(async () => {
+    const canvas = canvasRef.current;
+    if (!canvas || isGenerating) return;
+
+    setGradingResult(null);
+    setShowMarkers(false);
+    setMarkerAnimationIndex(0);
+    clearOverlay();
+
+    try {
+      const prompt = `この習字を採点してください。お手本の文字は「${selectedChar.char}」（${selectedChar.reading}）です。${selectedChar.description}の練習として書かれています。JSON形式のみで回答してください。`;
+
+      await sendMessage(prompt, canvas);
+    } catch (error) {
+      console.error('Grading error:', error);
+    }
+  }, [canvasRef, isGenerating, selectedChar, sendMessage, clearOverlay]);
+
+  // AIレスポンスからJSONを抽出してパース
+  useEffect(() => {
+    if (messages.length === 0) return;
+
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage.role !== 'assistant' || lastMessage.isStreaming) return;
+
+    try {
+      // JSONを抽出
+      const content = lastMessage.content;
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]) as GradingResult;
+        if (parsed.score !== undefined && parsed.overallComment && parsed.details) {
+          setGradingResult(parsed);
+          setShowMarkers(true);
+          setMarkerAnimationIndex(0);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to parse grading result:', error);
+    }
+  }, [messages]);
+
+  // スコアに応じた色を返す
+  const getScoreColor = (score: number) => {
+    if (score >= 80) return 'text-green-400';
+    if (score >= 60) return 'text-yellow-400';
+    if (score >= 40) return 'text-orange-400';
+    return 'text-red-400';
+  };
+
+  return (
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Status Bar */}
+      {status === 'downloading' && downloadProgress !== null && (
+        <div className="px-4 py-2 bg-blue-500 text-white text-sm">
+          AIモデルをダウンロード中... {downloadProgress}%
+        </div>
+      )}
+      {status === 'unavailable' && (
+        <div className="px-4 py-2 bg-red-500 text-white text-sm">
+          {apiError || 'Prompt API が利用できません'}
+        </div>
+      )}
+
+      <div className="flex-1 flex flex-col lg:flex-row gap-4 p-4 overflow-hidden">
+        {/* Canvas Area */}
+        <div className="flex-1 flex flex-col gap-4 min-h-0">
+          {/* Toolbar */}
+          <div className="flex flex-wrap items-center gap-3 p-3 bg-[hsl(var(--secondary))] rounded-lg">
+            {/* Character Selector */}
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium">お手本:</label>
+              <select
+                value={selectedChar.char}
+                onChange={(e) => {
+                  const char = SAMPLE_CHARACTERS.find(c => c.char === e.target.value);
+                  if (char) setSelectedChar(char);
+                }}
+                className="px-3 py-1.5 bg-[hsl(var(--background))] border border-[hsl(var(--border))] rounded text-lg"
+                style={{ fontFamily: "'Noto Serif JP', serif" }}
+              >
+                {SAMPLE_CHARACTERS.map(c => (
+                  <option key={c.char} value={c.char}>{c.char} ({c.reading})</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="w-px h-6 bg-[hsl(var(--border))]" />
+
+            {/* Tools */}
+            <div className="flex gap-1 p-1 bg-[hsl(var(--background))] rounded">
+              <button
+                onClick={() => setTool('brush')}
+                className={`p-2 rounded transition-colors ${
+                  tool === 'brush'
+                    ? 'bg-[hsl(var(--primary))] text-white'
+                    : 'hover:bg-[hsl(var(--secondary))]'
+                }`}
+                title="筆"
+              >
+                <Pen className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => setTool('eraser')}
+                className={`p-2 rounded transition-colors ${
+                  tool === 'eraser'
+                    ? 'bg-[hsl(var(--primary))] text-white'
+                    : 'hover:bg-[hsl(var(--secondary))]'
+                }`}
+                title="消しゴム"
+              >
+                <Eraser className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Clear Button */}
+            <button
+              onClick={clearCanvas}
+              className="p-2 bg-red-500 text-white rounded hover:bg-red-600 transition-colors"
+              title="クリア"
+            >
+              <Trash2 className="w-5 h-5" />
+            </button>
+
+            <div className="flex-1" />
+
+            {/* Grade Button */}
+            <button
+              onClick={handleGrading}
+              disabled={isGenerating || status !== 'available'}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isGenerating ? (
+                <>
+                  <RefreshCw className="w-5 h-5 animate-spin" />
+                  採点中...
+                </>
+              ) : (
+                <>
+                  <Send className="w-5 h-5" />
+                  採点する
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Canvas with Model */}
+          <div className="flex-1 flex gap-4 min-h-0">
+            {/* Main Canvas */}
+            <div className="flex-1 flex items-center justify-center bg-[hsl(var(--secondary))] rounded-lg overflow-hidden relative">
+              {/* 半紙キャンバス */}
+              <div className="relative">
+                <canvas
+                  ref={canvasRef}
+                  width={800}
+                  height={600}
+                  onPointerDown={startDrawing}
+                  onPointerMove={draw}
+                  onPointerUp={stopDrawing}
+                  onPointerLeave={stopDrawing}
+                  className="max-w-full max-h-full cursor-crosshair touch-none shadow-lg"
+                  style={{
+                    imageRendering: 'auto',
+                    boxShadow: '0 4px 20px rgba(0,0,0,0.3), inset 0 0 30px rgba(0,0,0,0.05)'
+                  }}
+                />
+                {/* オーバーレイキャンバス（赤丸マーカー用） */}
+                <canvas
+                  ref={overlayCanvasRef}
+                  width={800}
+                  height={600}
+                  className="absolute top-0 left-0 max-w-full max-h-full pointer-events-none"
+                  style={{ imageRendering: 'auto' }}
+                />
+              </div>
+
+              {/* お手本表示（右上） */}
+              <div className="absolute top-4 right-4 bg-white/90 rounded-lg p-4 shadow-lg border-2 border-amber-200">
+                <div className="text-xs text-gray-500 mb-1 text-center">お手本</div>
+                <div
+                  className="text-7xl text-gray-800 leading-none"
+                  style={{
+                    fontFamily: "'Noto Serif JP', serif",
+                    fontWeight: 900,
+                  }}
+                >
+                  {selectedChar.char}
+                </div>
+                <div className="text-xs text-gray-500 mt-2 text-center max-w-[100px]">
+                  {selectedChar.description}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* AI Grading Results */}
+        <div className="w-full lg:w-96 flex flex-col bg-[hsl(var(--secondary))] rounded-lg overflow-hidden relative">
+          <div className="p-3 border-b border-[hsl(var(--border))]">
+            <h2 className="font-semibold flex items-center gap-2">
+              <span className="text-2xl">📝</span>
+              先生の採点
+            </h2>
+          </div>
+          <div
+            ref={messagesContainerRef}
+            className="flex-1 overflow-y-auto p-4 space-y-4"
+          >
+            {!gradingResult && !isGenerating ? (
+              <div className="text-center py-8">
+                <p className="text-4xl mb-4">🖌️</p>
+                <p className="text-sm text-[hsl(var(--muted-foreground))]">
+                  お手本を見ながら文字を書いて、<br />
+                  「採点する」ボタンを押してください
+                </p>
+              </div>
+            ) : (
+              <>
+                {gradingResult && (
+                  <div className="space-y-4">
+                    {/* スコア表示 */}
+                    <div className="bg-[hsl(var(--background))] rounded-lg p-4 text-center">
+                      <div className="text-sm text-[hsl(var(--muted-foreground))] mb-2">評価</div>
+                      <div className={`text-5xl font-bold ${getScoreColor(gradingResult.score)}`}>
+                        {gradingResult.score}
+                        <span className="text-2xl text-[hsl(var(--muted-foreground))]">/100</span>
+                      </div>
+                    </div>
+
+                    {/* 全体コメント */}
+                    <div className="bg-[hsl(var(--background))] rounded-lg p-4">
+                      <div className="flex items-start gap-3">
+                        <span className="text-2xl">👨‍🏫</span>
+                        <div className="flex-1">
+                          <div className="text-sm font-medium mb-1">先生のコメント</div>
+                          <p className="text-[hsl(var(--foreground))]">
+                            {gradingResult.overallComment}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 個別指摘 */}
+                    {gradingResult.details.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="text-sm font-medium flex items-center gap-2">
+                          <span className="text-red-500">⭕</span>
+                          指摘箇所
+                        </div>
+                        {gradingResult.details.map((detail, index) => (
+                          <div
+                            key={index}
+                            className="bg-[hsl(var(--background))] rounded-lg p-3 border-l-4 border-red-500"
+                          >
+                            <div className="text-xs text-[hsl(var(--muted-foreground))] mb-1">
+                              位置: ({Math.round(detail.x)}, {Math.round(detail.y)})
+                            </div>
+                            <p className="text-sm text-[hsl(var(--foreground))]">
+                              {detail.comment}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {isGenerating && (
+                  <div className="flex justify-center py-4">
+                    <div className="flex items-center gap-2 text-[hsl(var(--muted-foreground))]">
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      <span>採点中...</span>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {isGenerating && (
+              <div className="flex justify-center">
+                <button
+                  onClick={stopGeneration}
+                  className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+                >
+                  停止
+                </button>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Scroll to bottom indicator */}
+          {showScrollIndicator && (
+            <button
+              onClick={scrollToBottom}
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 p-2 bg-[hsl(var(--primary))] text-white rounded-full shadow-lg hover:bg-[hsl(var(--primary)/0.9)] transition-all animate-bounce"
+              title="最新のメッセージへ"
+            >
+              <ChevronDown className="w-5 h-5" />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
