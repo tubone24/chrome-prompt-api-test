@@ -82,11 +82,12 @@ const gridToCoordinates = (gridPosition: number): { x: number; y: number } => {
   const col = (gridPosition - 1) % 5; // 0-4
   const row = Math.floor((gridPosition - 1) / 5); // 0-4
 
-  // キャンバスは800x600、文字領域は約100-700(x)、80-520(y)
-  const startX = 100;
-  const endX = 700;
-  const startY = 80;
-  const endY = 520;
+  // キャンバスは800x600、余白を少し取って全体をカバー
+  // 余白40pxを取り、720x520の領域を5x5に分割
+  const startX = 40;
+  const endX = 760;
+  const startY = 40;
+  const endY = 560;
 
   const cellWidth = (endX - startX) / 5;
   const cellHeight = (endY - startY) / 5;
@@ -247,18 +248,17 @@ export const CalligraphyChecker = () => {
 - 文字全体のバランスと形
 - お手本との比較
 
-【重要】位置指定について：
-画像を5x5のグリッド（25マス）に分割して考える。
-グリッド番号は左上から右に向かって1-5、次の行が6-10...という配置：
- 1  2  3  4  5
+【位置指定】
+画像全体を5x5のグリッド（25マス）で考える：
+ 1  2  3  4  5  (上段)
  6  7  8  9 10
-11 12 13 14 15
+11 12 13 14 15  (中段)
 16 17 18 19 20
-21 22 23 24 25
+21 22 23 24 25  (下段)
 
-detailsのgridPositionには、問題のある筆画が位置するグリッド番号（1-25）を指定すること。
-例：文字の上部中央に問題があれば3、中央なら13、左下なら21。
-指摘箇所は最大3つまで、最も重要な問題点のみ指摘すること。`,
+文字の問題箇所をグリッド番号で指定する。
+文字は通常、画像の中央（グリッド7,8,9,12,13,14,17,18,19あたり）に書かれている。
+指摘は最大3箇所まで。`,
     multimodal: true,
     temperature: 0.5,
     responseConstraint: GRADING_SCHEMA,
@@ -1284,8 +1284,15 @@ detailsで指摘する位置は、5x5グリッドの番号（1-25）で指定し
           <div className="flex-1 flex gap-4 min-h-0">
             {/* Main Canvas */}
             <div className="flex-1 flex items-center justify-center bg-[hsl(var(--secondary))] rounded-lg overflow-hidden relative">
-              {/* 半紙キャンバス - 両キャンバスを同じサイズで重ねる */}
-              <div className="relative" style={{ width: '800px', height: '600px', maxWidth: '100%', maxHeight: '100%' }}>
+              {/* 半紙キャンバス - アスペクト比を保持して重ねる */}
+              <div
+                className="relative"
+                style={{
+                  width: '100%',
+                  maxWidth: '800px',
+                  aspectRatio: '800 / 600'
+                }}
+              >
                 <canvas
                   ref={canvasRef}
                   width={800}
@@ -1295,7 +1302,7 @@ detailsで指摘する位置は、5x5グリッドの番号（1-25）で指定し
                   onPointerUp={stopDrawing}
                   onPointerLeave={stopDrawing}
                   onPointerCancel={stopDrawing}
-                  className="touch-none shadow-lg"
+                  className="touch-none shadow-lg absolute inset-0"
                   style={{
                     width: '100%',
                     height: '100%',
@@ -1309,7 +1316,7 @@ detailsで指摘する位置は、5x5グリッドの番号（1-25）で指定し
                   ref={overlayCanvasRef}
                   width={800}
                   height={600}
-                  className="absolute top-0 left-0 pointer-events-none"
+                  className="absolute inset-0 pointer-events-none"
                   style={{ width: '100%', height: '100%', imageRendering: 'auto' }}
                 />
               </div>
